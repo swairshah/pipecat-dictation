@@ -1,0 +1,20 @@
+[project]
+name = "pipecat-dictation"
+version = "0.1.0"
+description = "Voice dictation and command runner"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "python-dotenv",
+    "fastapi[all]",
+    "uvicorn",
+    "opencv-python",
+    "pipecat-ai[openai,webrtc,silero]>=0.0.80",
+    "pipecat-ai-small-webrtc-prebuilt",
+    "aiortc",
+    "nltk",
+    "pyautogui",
+    "python-xlib",
+    "pynput",
+    "pyperclip",
+]

@@ -1,0 +1,7 @@
+
+https://github.com/ReimuNotMoe/ydotool.git
+
+mkdir build
+cd build
+cmake ..
+make -j `nproc`
