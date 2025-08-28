@@ -1,7 +1,13 @@
 
-https://github.com/ReimuNotMoe/ydotool.git
+# ydotool
 
-mkdir build
-cd build
-cmake ..
-make -j `nproc`
+Requirements on linux - ydotool
+We're using an old version of ydotool because that's what apt has.
+
+Need to install ydotool and add user to input group
+
+```
+apt install ydotool
+usermod -a -G input $USER
+```
+

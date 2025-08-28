@@ -6,6 +6,7 @@ Provides clean interfaces for LLM tool calls to control application windows.
 from typing import Dict, List, Optional
 from window_control import WindowController
 from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.services.llm_service import FunctionCallParams
 
 
 # Global controller instance (singleton)
@@ -55,6 +56,14 @@ def list_windows() -> Dict[str, List[Dict[str, str]]]:
     }
 
 
+async def handle_list_windows(params: FunctionCallParams):
+    """
+    Handle list_windows function call for Pipecat.
+    """
+    result = list_windows()
+    await params.result_callback(result)
+
+
 def remember_window(name: str, wait_seconds: int = 3) -> Dict[str, any]:
     """
     Remember/save the currently focused window with a given name.
@@ -95,6 +104,16 @@ def remember_window(name: str, wait_seconds: int = 3) -> Dict[str, any]:
         return {"success": False, "error": str(e)}
 
 
+async def handle_remember_window(params: FunctionCallParams):
+    """
+    Handle remember_window function call for Pipecat.
+    """
+    name = params.arguments.get("name")
+    wait_seconds = params.arguments.get("wait_seconds", 3)
+    result = remember_window(name, wait_seconds)
+    await params.result_callback(result)
+
+
 def send_text_to_window(
     text: str, window_name: Optional[str] = None, send_newline: bool = True
 ) -> Dict[str, any]:
@@ -124,6 +143,15 @@ def send_text_to_window(
         }
 
     try:
+        # Special casing "escape" to send escape key
+        if text == "escape":
+            controller.send_key_to_window("escape", window_name)
+            return {
+                "success": True,
+                "message": "Escape sent to window",
+                "window_used": window_name,
+            }
+
         # Send the text
         controller.send_keystrokes_to_window(text, window_name)
 
@@ -143,6 +171,17 @@ def send_text_to_window(
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+async def handle_send_text_to_window(params: FunctionCallParams):
+    """
+    Handle send_text_to_window function call for Pipecat.
+    """
+    text = params.arguments.get("text")
+    window_name = params.arguments.get("window_name", None)
+    send_newline = params.arguments.get("send_newline", True)
+    result = send_text_to_window(text, window_name, send_newline)
+    await params.result_callback(result)
 
 
 def focus_window(window_name: Optional[str] = None) -> Dict[str, any]:
@@ -181,6 +220,15 @@ def focus_window(window_name: Optional[str] = None) -> Dict[str, any]:
             return {"success": False, "error": f"Failed to focus window '{target}'"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+async def handle_focus_window(params: FunctionCallParams):
+    """
+    Handle focus_window function call for Pipecat.
+    """
+    window_name = params.arguments.get("window_name", None)
+    result = focus_window(window_name)
+    await params.result_callback(result)
 
 
 # ============================================================================
@@ -259,6 +307,13 @@ WINDOW_CONTROL_FUNCTIONS = {
     "focus_window": (focus_window, focus_window_schema),
 }
 
+WINDOW_CONTROL_HANDLERS = {
+    "list_windows": handle_list_windows,
+    "remember_window": handle_remember_window,
+    "send_text_to_window": handle_send_text_to_window,
+    "focus_window": handle_focus_window,
+}
+
 
 def get_window_control_schemas() -> List[FunctionSchema]:
     """Get all window control function schemas for Pipecat."""
@@ -267,4 +322,4 @@ def get_window_control_schemas() -> List[FunctionSchema]:
 
 def get_window_control_handlers() -> Dict[str, callable]:
     """Get all window control function handlers for Pipecat."""
-    return {name: func for name, (func, _) in WINDOW_CONTROL_FUNCTIONS.items()}
+    return WINDOW_CONTROL_HANDLERS
