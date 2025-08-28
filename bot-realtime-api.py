@@ -6,12 +6,10 @@
 
 
 import os
-from datetime import datetime
 
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat_window_functions import (
     list_windows,
@@ -21,7 +19,7 @@ from pipecat_window_functions import (
     list_windows_schema,
     remember_window_schema,
     send_text_to_window_schema,
-    focus_window_schema
+    focus_window_schema,
 )
 from pipecat.frames.frames import TranscriptionMessage
 from pipecat.pipeline.pipeline import Pipeline
@@ -73,12 +71,14 @@ async def handle_focus_window(params: FunctionCallParams):
 
 
 # Create tools schema with window control functions
-tools = ToolsSchema(standard_tools=[
-    list_windows_schema,
-    remember_window_schema,
-    send_text_to_window_schema,
-    focus_window_schema
-])
+tools = ToolsSchema(
+    standard_tools=[
+        list_windows_schema,
+        remember_window_schema,
+        send_text_to_window_schema,
+        focus_window_schema,
+    ]
+)
 
 
 # We store functions so objects (e.g. SileroVADAnalyzer) don't get
@@ -93,7 +93,7 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     session_properties = SessionProperties(
         input_audio_transcription=InputAudioTranscription(),
@@ -103,7 +103,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         # Or set to False to disable openai turn detection and use transport VAD
         # turn_detection=False,
         input_audio_noise_reduction=InputAudioNoiseReduction(type="near_field"),
-        tools=tools,
         instructions="""You are a helpful and friendly AI.
 
 Act like a human, but remember that you aren't a human and that you can't do human
@@ -178,13 +177,13 @@ Remember, your responses should be short. Just one or two sentences, usually. Re
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         # Kick off the conversation.
         await task.queue_frames([context_aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
+        logger.info("Client disconnected")
         await task.cancel()
 
     # Register event handler for transcript updates
