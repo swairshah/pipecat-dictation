@@ -6,13 +6,21 @@
 
 
 import os
-from datetime import datetime
 
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat_window_functions import (
+    list_windows,
+    remember_window,
+    send_text_to_window,
+    focus_window,
+    list_windows_schema,
+    remember_window_schema,
+    send_text_to_window_schema,
+    focus_window_schema,
+)
 from pipecat.frames.frames import TranscriptionMessage
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -36,53 +44,41 @@ from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIPro
 load_dotenv(override=True)
 
 
-async def fetch_weather_from_api(params: FunctionCallParams):
-    temperature = 75 if params.arguments["format"] == "fahrenheit" else 24
-    await params.result_callback(
-        {
-            "conditions": "nice",
-            "temperature": temperature,
-            "format": params.arguments["format"],
-            "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        }
-    )
+async def handle_list_windows(params: FunctionCallParams):
+    result = list_windows()
+    await params.result_callback(result)
 
 
-async def fetch_restaurant_recommendation(params: FunctionCallParams):
-    await params.result_callback({"name": "The Golden Dragon"})
+async def handle_remember_window(params: FunctionCallParams):
+    name = params.arguments.get("name")
+    wait_seconds = params.arguments.get("wait_seconds", 3)
+    result = remember_window(name, wait_seconds)
+    await params.result_callback(result)
 
 
-weather_function = FunctionSchema(
-    name="get_current_weather",
-    description="Get the current weather",
-    properties={
-        "location": {
-            "type": "string",
-            "description": "The city and state, e.g. San Francisco, CA",
-        },
-        "format": {
-            "type": "string",
-            "enum": ["celsius", "fahrenheit"],
-            "description": "The temperature unit to use. Infer this from the users location.",
-        },
-    },
-    required=["location", "format"],
+async def handle_send_text_to_window(params: FunctionCallParams):
+    text = params.arguments.get("text")
+    window_name = params.arguments.get("window_name", None)
+    send_newline = params.arguments.get("send_newline", True)
+    result = send_text_to_window(text, window_name, send_newline)
+    await params.result_callback(result)
+
+
+async def handle_focus_window(params: FunctionCallParams):
+    window_name = params.arguments.get("window_name", None)
+    result = focus_window(window_name)
+    await params.result_callback(result)
+
+
+# Create tools schema with window control functions
+tools = ToolsSchema(
+    standard_tools=[
+        list_windows_schema,
+        remember_window_schema,
+        send_text_to_window_schema,
+        focus_window_schema,
+    ]
 )
-
-restaurant_function = FunctionSchema(
-    name="get_restaurant_recommendation",
-    description="Get a restaurant recommendation",
-    properties={
-        "location": {
-            "type": "string",
-            "description": "The city and state, e.g. San Francisco, CA",
-        },
-    },
-    required=["location"],
-)
-
-# Create tools schema
-tools = ToolsSchema(standard_tools=[weather_function, restaurant_function])
 
 
 # We store functions so objects (e.g. SileroVADAnalyzer) don't get
@@ -97,7 +93,7 @@ transport_params = {
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    logger.info(f"Starting bot")
+    logger.info("Starting bot")
 
     session_properties = SessionProperties(
         input_audio_transcription=InputAudioTranscription(),
@@ -107,7 +103,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         # Or set to False to disable openai turn detection and use transport VAD
         # turn_detection=False,
         input_audio_noise_reduction=InputAudioNoiseReduction(type="near_field"),
-        # tools=tools,
         instructions="""You are a helpful and friendly AI.
 
 Act like a human, but remember that you aren't a human and that you can't do human
@@ -122,8 +117,10 @@ You are participating in a voice conversation. Keep your responses concise, shor
 unless specifically asked to elaborate on a topic.
 
 You have access to the following tools:
-- get_current_weather: Get the current weather for a given location.
-- get_restaurant_recommendation: Get a restaurant recommendation for a given location.
+- list_windows: Get the list of all remembered windows that can receive text.
+- remember_window: Save the currently focused window with a name for later use.
+- send_text_to_window: Send text to a specific remembered window.
+- focus_window: Focus/activate a specific remembered window.
 
 Remember, your responses should be short. Just one or two sentences, usually. Respond in English.""",
     )
@@ -135,12 +132,11 @@ Remember, your responses should be short. Just one or two sentences, usually. Re
         model="gpt-4o-realtime-preview-2025-08-25",
     )
 
-    # you can either register a single function for all function calls, or specific functions
-    # llm.register_function(None, fetch_weather_from_api)
-    llm.register_function("get_current_weather", fetch_weather_from_api)
-    llm.register_function(
-        "get_restaurant_recommendation", fetch_restaurant_recommendation
-    )
+    # Register window control functions
+    llm.register_function("list_windows", handle_list_windows)
+    llm.register_function("remember_window", handle_remember_window)
+    llm.register_function("send_text_to_window", handle_send_text_to_window)
+    llm.register_function("focus_window", handle_focus_window)
 
     transcript = TranscriptProcessor()
 
@@ -181,13 +177,13 @@ Remember, your responses should be short. Just one or two sentences, usually. Re
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        logger.info(f"Client connected")
+        logger.info("Client connected")
         # Kick off the conversation.
         await task.queue_frames([context_aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
-        logger.info(f"Client disconnected")
+        logger.info("Client disconnected")
         await task.cancel()
 
     # Register event handler for transcript updates

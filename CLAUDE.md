@@ -37,31 +37,34 @@ This repository contains a sophisticated window control system for sending keybo
 4. Log out and back in for group changes
 
 ### macOS
-- No additional setup required (pynput works out of the box)
+- Install dependencies: `uv pip install pynput`
+- No additional system setup required (pynput works out of the box)
 
 ## Usage
 
 ### CLI Commands
 
+**Note: This project uses `uv` for dependency management. Always use `uv run` to execute commands:**
+
 ```bash
 # List all saved windows
-python window_control.py list
-python window_control.py  # (defaults to list)
+uv run python window_control.py list
+uv run python window_control.py  # (defaults to list)
 
 # Add/update a window (will count down 3 seconds)
-python window_control.py add "my editor"
-python window_control.py add "terminal" --wait 5  # Wait 5 seconds
+uv run python window_control.py add "my editor"
+uv run python window_control.py add "terminal" --wait 5  # Wait 5 seconds
 
 # Remove a saved window
-python window_control.py remove "my editor"
+uv run python window_control.py remove "my editor"
 
 # Focus a specific window
-python window_control.py focus "my editor"
-python window_control.py focus  # Focus last used
+uv run python window_control.py focus "my editor"
+uv run python window_control.py focus  # Focus last used
 
 # Test sending text to a window
-python window_control.py test "my editor"
-python window_control.py test  # Test last used
+uv run python window_control.py test "my editor"
+uv run python window_control.py test  # Test last used
 ```
 
 ### Python API
