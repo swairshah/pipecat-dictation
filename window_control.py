@@ -106,11 +106,11 @@ class WindowController:
         self.original_position: Optional[Tuple[int, int]] = None
         self.last_used_window: Optional[str] = None
         
-        # Load cached windows
-        self.load_cache()
-        
         # Print platform info (only in verbose mode)
         self.verbose = False
+        
+        # Load cached windows
+        self.load_cache()
     
     def set_verbose(self, verbose: bool):
         """Enable/disable verbose output."""
