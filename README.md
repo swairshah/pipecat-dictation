@@ -1,5 +1,7 @@
 # Pipecat Dictation
 
+[![Watch a quick demo](https://img.youtube.com/vi/X0ziwytJP0w/hqdefault.jpg)](https://youtube.com/shorts/X0ziwytJP0w?feature=share)
+
 Voice dictation assistant that uses an LLM to turn speech into text and send that text to target windows.
 
 This is a slightly cleaned up version of code I use every day and am always hacking on. I stripped out a lot of stuff (screenshot and image pasting, command sequences, todo list memos) to make this more approachable, but if there's interest in maintaining and extending this, we can add features back in!
@@ -8,6 +10,8 @@ Current features:
   - keep track of target windows by name
   - dictate in "immediate mode" or "accumulate mode"
   - clean up text before sending to target window
+  - run JSON-defined action sequences (focus, move, click, type, wait)
+  - record clicks/keys into JSON sequences for easy playback
 
 Window name/position mappings are persisted in ~/.pipecat-dictation/window_memory.json
 
@@ -32,7 +36,7 @@ The bot is a [Pipecat](https://pipecat.ai) voice agent that uses OpenAI's Realti
 
 We run the bot process locally and connect to it via a [serverless WebRTC](https://docs.pipecat.ai/server/services/transport/small-webrtc) connection. We use WebRTC for flexibility and because Pipecat comes with a bunch of helpful [client-side SDK tooling](https://github.com/pipecat-ai/voice-ui-kit). (For example, we get echo cancellation and a simple developer playground UI by using the pipecat-ai-small-webrtc-prebuilt Python package and connecting via the browser.)
 
-The bot loads instructions from [prompt-realtime-api.txt](./prompt-realtime-api.txt)
+The bot loads instructions from [prompt-realtime-api.txt](./prompt-realtime-api.txt). The current version of the prompt was largely written by GPT-5.
 
 ## Platform specific notes
 
@@ -53,3 +57,65 @@ sudo usermod -a -G input $USER
 ```
 
 Note that we are using an old version of ydotool because that's what you can install via apt. If you're on a distro with a newer ydotool or you've built ydotool from source, the arguments to `ydotool` will be incompatible. PRs are welcome!
+
+## Action Sequences
+
+You can define and run multi-step UI sequences without touching the keyboard.
+
+- `action_runner.py` executes a JSON list of actions: focus windows, move/hover/click the mouse, type text, press keys, and wait between steps.
+- The `prompt_point` action lets the runner ask you to hover the mouse somewhere; it captures coordinates after a short countdown.
+
+Examples:
+
+- Play a sequence:
+  - `uv run python action_runner.py play sequences/restart_and_connect.json`
+
+- Append a capture step to a sequence:
+  - `uv run python action_runner.py capture-point sequences/restart_and_connect.json connect_btn --message "Hover over Connect" --countdown 3`
+
+Integrating with the bot (Pipecat):
+- A tool `run_actions` is exposed to the LLM, so it can propose a batch of actions (including `prompt_point`) and execute them in order. This enables guided, hands-free flows: the model can ask you to hover, then click/type across different windows.
+
+### Recording sequences
+
+You can capture your own clicks and keystrokes and save them as a JSON sequence for later playback.
+
+- Start recording and save to a file (press `Esc` to stop):
+  - `uv run python action_runner.py record sequences/my_macro.json`
+
+- Append to an existing file:
+  - `uv run python action_runner.py record sequences/my_macro.json --append`
+
+- Tag keystrokes to a specific remembered window (so keys go to that window on playback):
+  - `uv run python action_runner.py record sequences/my_macro.json --window terminal`
+
+- Insert `focus_window` actions on the fly using function keys mapped to names:
+  - `uv run python action_runner.py record sequences/my_macro.json --window-map "1:bot,2:browser"`
+  - While recording, press `F1` to insert `{ "type": "focus_window", "name": "bot" }`, `F2` for `browser`, etc.
+
+Notes:
+- The recorder inserts a `wait` action when you pause longer than `--min-wait` (default 0.25s).
+- Mouse clicks are recorded as `move_mouse` to the click location followed by `click`. Close-together clicks are merged into multi-clicks (configurable with `--double-click-window`).
+- Regular typing is batched into `send_text` actions. Special keys like Enter/Tab/Arrow keys are recorded as `key` actions. If `--window` is provided, these are sent to that window on playback.
+
+### Voice control (Pipecat tools)
+
+The bot exposes tools to both execute and create sequences by voice:
+
+- `run_actions`: Provide a JSON array of actions (focus/move/hover/click/send_text/key/wait/prompt_point) to execute.
+- `start_action_recording`: Begin background recording of clicks/keys. You can optionally set a default window and F-key focus hotkeys (e.g., F1→`bot`).
+- `stop_action_recording`: Stop recording and return the captured actions; optionally save to a file and/or append.
+- `save_sequence`: Save actions (or the most recent recording) under a friendly name and update the index.
+- `list_sequences`: List saved sequences with names and file paths.
+- `delete_sequence`: Remove a sequence by name (and optionally delete its file).
+- `run_sequence`: Run a named sequence from the index.
+
+Example flows you can say to the bot:
+- “Start recording a sequence for the terminal window.”
+- (click, type, navigate)
+- “Stop recording and save it as sequences/my_macro.json.”
+- “Run that sequence now.”
+- “Save this sequence as ‘restart and connect’.”
+- “List my sequences.”
+- “Run ‘restart and connect’.”
+- “Delete the sequence ‘restart and connect’.”
