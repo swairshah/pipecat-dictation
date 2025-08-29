@@ -83,7 +83,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         api_key=os.getenv("OPENAI_API_KEY"),
         session_properties=session_properties,
         start_audio_paused=False,
-        model="gpt-4o-realtime-preview-2025-08-25",
+        model="gpt-realtime",
     )
 
     # Register window control functions
