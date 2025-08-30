@@ -38,6 +38,32 @@ We run the bot process locally and connect to it via a [serverless WebRTC](https
 
 The bot loads instructions from [prompt-realtime-api.txt](./prompt-realtime-api.txt). The current version of the prompt was largely written by GPT-5.
 
+## Local macOS transport (optional)
+
+If you don’t want to use WebRTC for local testing on macOS, this repo includes a local transport that uses Apple’s VoiceProcessingIO (VPIO) audio unit for capture/playback with built‑in echo cancellation and noise reduction.
+
+- File: `macos/local_mac_transport.py`
+- Helper: `macos/vpio_helper.c` (compiled into `macos/libvpio.dylib`)
+
+Build the helper once:
+
+```bash
+# Requires Xcode Command Line Tools
+clang -dynamiclib -o macos/libvpio.dylib macos/vpio_helper.c \
+  -framework AudioToolbox -framework AudioUnit
+```
+
+Run the bot with the local transport:
+
+```bash
+uv run bot-realtime-api.py -t local
+```
+
+Notes:
+- The transport loads `macos/libvpio.dylib` by default. You can override with `VPIO_LIB=/path/to/libvpio.dylib`.
+- Set `VPIO_DEBUG=1` to log pacing/underflow metrics once per second.
+- Audio format is 16‑bit PCM mono at the configured sample rate (defaults to 16 kHz). The helper runs a small C pacing thread for low‑latency playback.
+
 ## Platform specific notes
 
 ### macOS

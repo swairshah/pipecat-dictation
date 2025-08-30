@@ -12,13 +12,19 @@
 // Simple C helper that wraps VoiceProcessingIO (AEC) and exposes a tiny C API
 // for Python to call via ctypes without RT callbacks crossing the boundary.
 
+// Forward declarations for functions used before their definitions
+int vpio_start_stream(double sample_rate, int channels, size_t ring_capacity_bytes);
+void vpio_stop_stream(void);
+int vpio_start_playback_thread(int slice_ms, int preroll_ms);
+void vpio_stop_playback_thread(void);
+
 static AudioUnit gAudioUnit = NULL;
 static double gSampleRate = 16000.0;
 static int gChannels = 1;
 static const int kBytesPerSample = 2; // SInt16
 
 typedef enum { MODE_IDLE = 0, MODE_RECORD = 1, MODE_PLAY = 2 } Mode;
-static volatile Mode gMode = MODE_IDLE;
+static _Atomic Mode gMode = MODE_IDLE;
 static int gTrace = 0; // enable verbose logs if VPIO_TRACE is set
 
 // Capture buffer
@@ -55,7 +61,7 @@ static int gInLockInit = 0;
 
 // Playback thread control
 static pthread_t gPlayThread;
-static volatile int gPlayThreadRun = 0;
+static _Atomic int gPlayThreadRun = 0;
 static int gSliceMs = 5;        // pacing slice in ms
 static int gPrerollMs = 40;     // preroll before steady pacing
 static int gHeadroomMs = 10;    // target minimum headroom during steady state
@@ -143,11 +149,14 @@ static size_t copy_from_staging_to_play(size_t nbytes) {
 }
 
 static void* playback_thread_fn(void* arg) {
+#if defined(__APPLE__)
+  pthread_setname_np("vpio-play");
+#endif
   const size_t b_per_ms = bytes_per_ms();
   const size_t slice_bytes = b_per_ms * (size_t)gSliceMs;
   gDidPreroll = 0;
   unsigned long _vpio_iter = 0; // for periodic logs
-  while (gPlayThreadRun) {
+  while (atomic_load_explicit(&gPlayThreadRun, memory_order_acquire)) {
     // If nothing in play ring, consider this a new segment: re-preroll
     size_t _pw = atomic_load_explicit(&gPlayW, memory_order_acquire);
     size_t _pr = atomic_load_explicit(&gPlayR, memory_order_acquire);
@@ -236,8 +245,20 @@ static OSStatus render_cb(void *inRefCon,
   atomic_store_explicit(&gRenderLastBytes, bytesNeeded, memory_order_release);
   size_t _rmax = atomic_load_explicit(&gRenderMaxBytes, memory_order_acquire);
   if (bytesNeeded > _rmax) atomic_store_explicit(&gRenderMaxBytes, bytesNeeded, memory_order_release);
+  // Periodically decay the max to avoid a single spike inflating headroom forever.
+  {
+    static unsigned decay_counter = 0;
+    if ((++decay_counter % 100) == 0) {
+      size_t cur = atomic_load_explicit(&gRenderMaxBytes, memory_order_acquire);
+      if (cur > 0) {
+        size_t decayed = cur - (cur / 50); // ~2% decay
+        if (decayed < bytesNeeded) decayed = bytesNeeded;
+        atomic_store_explicit(&gRenderMaxBytes, decayed, memory_order_release);
+      }
+    }
+  }
 
-  if (gMode == MODE_PLAY && gPlay && gPlayOff < gPlayLen) {
+  if (atomic_load_explicit(&gMode, memory_order_acquire) == MODE_PLAY && gPlay && gPlayOff < gPlayLen) {
     size_t remaining = gPlayLen - gPlayOff;
     size_t toCopy = bytesNeeded < remaining ? bytesNeeded : remaining;
     memcpy(buf->mData, gPlay + gPlayOff, toCopy);
@@ -283,20 +304,29 @@ static int append_capture(const void *src, size_t len) {
   return 0;
 }
 
+// Reusable input scratch buffer to avoid per-callback malloc/free
+static unsigned char* gInputScratch = NULL;
+static size_t gInputScratchCap = 0;
+
 static OSStatus input_cb(void *inRefCon,
                          AudioUnitRenderActionFlags *ioActionFlags,
                          const AudioTimeStamp *inTimeStamp,
                          UInt32 inBusNumber,
                          UInt32 inNumberFrames,
                          AudioBufferList *ioData) {
-  if (gMode != MODE_RECORD) return noErr;
+  if (atomic_load_explicit(&gMode, memory_order_acquire) != MODE_RECORD) return noErr;
 
   UInt32 byteCount = inNumberFrames * (UInt32)(kBytesPerSample * gChannels);
   AudioBuffer buffer;
   buffer.mNumberChannels = (UInt32)gChannels;
   buffer.mDataByteSize = byteCount;
-  buffer.mData = malloc(byteCount);
-  if (!buffer.mData) return noErr;
+  if (gInputScratchCap < byteCount) {
+    unsigned char* p = (unsigned char*)realloc(gInputScratch, byteCount);
+    if (!p) return noErr; // drop frame on allocation failure
+    gInputScratch = p;
+    gInputScratchCap = byteCount;
+  }
+  buffer.mData = gInputScratch;
   AudioBufferList bl;
   bl.mNumberBuffers = 1;
   bl.mBuffers[0] = buffer;
@@ -306,22 +336,24 @@ static OSStatus input_cb(void *inRefCon,
   if (st == noErr) {
     // Append to streaming capture ring
     if (gCapRing && gCapCap) {
-      size_t freeBytes = (gCapCap > (gCapW - gCapR)) ? (gCapCap - (gCapW - gCapR)) : 0;
+      size_t capW = atomic_load_explicit(&gCapW, memory_order_acquire);
+      size_t capR = atomic_load_explicit(&gCapR, memory_order_acquire);
+      size_t freeBytes = (gCapCap > (capW - capR)) ? (gCapCap - (capW - capR)) : 0;
       if (byteCount > freeBytes) {
         size_t need = byteCount - freeBytes;
-        gCapR += need; // drop oldest
+        atomic_store_explicit(&gCapR, capR + need, memory_order_release); // drop oldest
+        capR += need;
       }
-      size_t widx = gCapW % gCapCap;
+      size_t widx = capW % gCapCap;
       size_t first = gCapCap - widx;
       if (first > byteCount) first = byteCount;
       memcpy(gCapRing + widx, buffer.mData, first);
       if (byteCount > first) memcpy(gCapRing, (unsigned char*)buffer.mData + first, byteCount - first);
-      gCapW += byteCount;
+      atomic_store_explicit(&gCapW, capW + byteCount, memory_order_release);
     }
     // Also keep simple capture for legacy API
     append_capture(buffer.mData, byteCount);
   }
-  free(buffer.mData);
   return st;
 }
 
@@ -333,7 +365,8 @@ static UInt32 fourcc(const char s[4]) {
 int vpio_init(double sample_rate, int channels) {
   if (gAudioUnit) return 0;
   gSampleRate = sample_rate;
-  gChannels = channels > 0 ? channels : 1;
+  // Force mono for VoiceProcessingIO
+  gChannels = 1;
   // Check env for tracing
   const char* tr = getenv("VPIO_TRACE");
   if (tr && tr[0] != '\0' && tr[0] != '0') gTrace = 1;
@@ -379,8 +412,8 @@ int vpio_init(double sample_rate, int channels) {
                                         0,
                                         &bypass,
                                         sizeof(bypass));
-    if (st2 != noErr) {
-      // Not fatal; continue. Some macOS versions may not expose this flag
+    if (st2 != noErr && gTrace) {
+      fprintf(stderr, "[VPIO] Warning: failed to set BypassVoiceProcessing (st=%d)\n", (int)st2);
     }
   }
 
@@ -422,12 +455,13 @@ int vpio_init(double sample_rate, int channels) {
   {
     UInt32 maxFrames = (UInt32)((gSampleRate / 1000.0) * 10.0); // ~10ms
     if (maxFrames < 80) maxFrames = 80; // at least ~5ms at 16k
-    AudioUnitSetProperty(gAudioUnit,
+    OSStatus pst = AudioUnitSetProperty(gAudioUnit,
                          kAudioUnitProperty_MaximumFramesPerSlice,
                          kAudioUnitScope_Global,
                          0,
                          &maxFrames,
                          sizeof(maxFrames));
+    if (pst != noErr && gTrace) fprintf(stderr, "[VPIO] pre-init MaxFramesPerSlice set failed (st=%d)\n", (int)pst);
   }
 
   st = AudioUnitInitialize(gAudioUnit);
@@ -435,17 +469,18 @@ int vpio_init(double sample_rate, int channels) {
   {
     UInt32 maxFrames = (UInt32)((gSampleRate / 1000.0) * 10.0); // ~10ms
     if (maxFrames < 80) maxFrames = 80; // at least ~5ms at 16k
-    AudioUnitSetProperty(gAudioUnit,
+    OSStatus pst = AudioUnitSetProperty(gAudioUnit,
                          kAudioUnitProperty_MaximumFramesPerSlice,
                          kAudioUnitScope_Global,
                          0,
                          &maxFrames,
                          sizeof(maxFrames));
+    if (pst != noErr && gTrace) fprintf(stderr, "[VPIO] post-init MaxFramesPerSlice set failed (st=%d)\n", (int)pst);
   }
-  if (st != noErr) return (int)st;
+  if (st != noErr) { if (gTrace) fprintf(stderr, "[VPIO] AudioUnitInitialize failed (st=%d)\n", (int)st); return (int)st; }
   st = AudioOutputUnitStart(gAudioUnit);
-  if (st != noErr) return (int)st;
-  gMode = MODE_IDLE;
+  if (st != noErr) { if (gTrace) fprintf(stderr, "[VPIO] AudioOutputUnitStart failed (st=%d)\n", (int)st); return (int)st; }
+  atomic_store_explicit(&gMode, MODE_IDLE, memory_order_release);
   return 0;
 }
 
@@ -458,32 +493,39 @@ int vpio_start_stream(double sample_rate, int channels, size_t ring_capacity_byt
   }
   gCapRing = (unsigned char*)malloc(ring_capacity_bytes);
   gCapCap = ring_capacity_bytes;
+  if (!gCapRing) { vpio_stop_stream(); return -1; }
   atomic_store_explicit(&gCapW, 0, memory_order_release);
   atomic_store_explicit(&gCapR, 0, memory_order_release);
 
   gPlayRing = (unsigned char*)malloc(ring_capacity_bytes);
   gPlayCap = ring_capacity_bytes;
+  if (!gPlayRing) { vpio_stop_stream(); return -1; }
   atomic_store_explicit(&gPlayW, 0, memory_order_release);
   atomic_store_explicit(&gPlayR, 0, memory_order_release);
   // staging ring for input frames (10ms)
   gInRing = (unsigned char*)malloc(ring_capacity_bytes);
   gInCap = ring_capacity_bytes;
+  if (!gInRing) { vpio_stop_stream(); return -1; }
   atomic_store_explicit(&gInW, 0, memory_order_release);
   atomic_store_explicit(&gInR, 0, memory_order_release);
   if (!gInLockInit) { pthread_mutex_init(&gInLock, NULL); gInLockInit = 1; }
   // Always be in record mode for streaming (AEC engaged)
-  gMode = MODE_RECORD;
+  atomic_store_explicit(&gMode, MODE_RECORD, memory_order_release);
   return 0;
 }
 
 void vpio_stop_stream(void) {
-  gMode = MODE_IDLE;
+  // Stop playback thread if running
+  if (atomic_load_explicit(&gPlayThreadRun, memory_order_acquire)) {
+    vpio_stop_playback_thread();
+  }
+  atomic_store_explicit(&gMode, MODE_IDLE, memory_order_release);
   if (gCapRing) { free(gCapRing); gCapRing = NULL; }
-  gCapCap = 0; gCapW = gCapR = 0;
+  gCapCap = 0; atomic_store_explicit(&gCapW, 0, memory_order_release); atomic_store_explicit(&gCapR, 0, memory_order_release);
   if (gPlayRing) { free(gPlayRing); gPlayRing = NULL; }
-  gPlayCap = 0; gPlayW = gPlayR = 0;
+  gPlayCap = 0; atomic_store_explicit(&gPlayW, 0, memory_order_release); atomic_store_explicit(&gPlayR, 0, memory_order_release);
   if (gInRing) { free(gInRing); gInRing = NULL; }
-  gInCap = 0; gInW = gInR = 0;
+  gInCap = 0; atomic_store_explicit(&gInW, 0, memory_order_release); atomic_store_explicit(&gInR, 0, memory_order_release);
   if (gInLockInit) { pthread_mutex_destroy(&gInLock); gInLockInit = 0; }
 }
 
@@ -546,14 +588,14 @@ void vpio_reset_underflow_count(void) {
 
 int vpio_record(double seconds) {
   if (!gAudioUnit) return -1;
-  gMode = MODE_RECORD;
+  atomic_store_explicit(&gMode, MODE_RECORD, memory_order_release);
   gCaptureSize = 0;
   double elapsed = 0.0;
   while (elapsed < seconds) {
     usleep(10 * 1000); // 10ms
     elapsed += 0.01;
   }
-  gMode = MODE_IDLE;
+  atomic_store_explicit(&gMode, MODE_IDLE, memory_order_release);
   return 0;
 }
 
@@ -583,7 +625,7 @@ int vpio_play(const void *data, size_t len) {
   memcpy(gPlay, data, len);
   gPlayLen = len;
   gPlayOff = 0;
-  gMode = MODE_PLAY;
+  atomic_store_explicit(&gMode, MODE_PLAY, memory_order_release);
 
   // Wait until played (approx)
   size_t bytesPerSec = (size_t)(gSampleRate * (kBytesPerSample * gChannels));
@@ -593,7 +635,7 @@ int vpio_play(const void *data, size_t len) {
     usleep(10 * 1000);
     elapsed += 0.01;
   }
-  gMode = MODE_IDLE;
+  atomic_store_explicit(&gMode, MODE_IDLE, memory_order_release);
   return 0;
 }
 
@@ -612,6 +654,7 @@ void vpio_shutdown(void) {
   if (gInRing) { free(gInRing); gInRing = NULL; }
   gInCap = 0; gInW = gInR = 0;
   if (gInLockInit) { pthread_mutex_destroy(&gInLock); gInLockInit = 0; }
+  if (gInputScratch) { free(gInputScratch); gInputScratch = NULL; gInputScratchCap = 0; }
   if (gCapture) {
     free(gCapture);
     gCapture = NULL;
@@ -723,19 +766,19 @@ int vpio_start_playback_thread(int slice_ms, int preroll_ms) {
   gSliceMs = slice_ms;
   gPrerollMs = preroll_ms;
   gDidPreroll = 0;
-  if (gPlayThreadRun) return 0; // already running
-  gPlayThreadRun = 1;
+  if (atomic_load_explicit(&gPlayThreadRun, memory_order_acquire)) return 0; // already running
+  atomic_store_explicit(&gPlayThreadRun, 1, memory_order_release);
   int rc = pthread_create(&gPlayThread, NULL, playback_thread_fn, NULL);
   if (rc != 0) {
-    gPlayThreadRun = 0;
+    atomic_store_explicit(&gPlayThreadRun, 0, memory_order_release);
     return -1;
   }
   return 0;
 }
 
 void vpio_stop_playback_thread(void) {
-  if (!gPlayThreadRun) return;
-  gPlayThreadRun = 0;
+  if (!atomic_load_explicit(&gPlayThreadRun, memory_order_acquire)) return;
+  atomic_store_explicit(&gPlayThreadRun, 0, memory_order_release);
   // wake the thread if sleeping
   usleep(1000);
   pthread_join(gPlayThread, NULL);

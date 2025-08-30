@@ -48,7 +48,7 @@ class _VPIOLib:
         lib_path = lib_path or os.getenv("VPIO_LIB", os.path.abspath("./macos/libvpio.dylib"))
         if not os.path.exists(lib_path):
             raise FileNotFoundError(
-                f"VPIO helper library not found at {lib_path}. Build it with: clang -dynamiclib -o libvpio.dylib examples/vpio_helper.c -framework AudioToolbox -framework AudioUnit"
+                f"VPIO helper library not found at {lib_path}. Build it with: clang -dynamiclib -o macos/libvpio.dylib macos/vpio_helper.c -framework AudioToolbox -framework AudioUnit"
             )
         self.C = C
         self.path = lib_path
@@ -192,6 +192,11 @@ class MacInputTransport(BaseInputTransport):
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
+        # Ensure the underlying VPIO engine is running
+        try:
+            await self._parent._ensure_stream_started()
+        except Exception:
+            logger.exception("Error starting VPIO stream for input")
         self._sample_rate = self._params.audio_in_sample_rate or frame.audio_in_sample_rate
         # Start polling capture ring
         self._stop = False
@@ -317,14 +322,13 @@ class MacOutputTransport(BaseOutputTransport):
         self._has_write_10ms = getattr(self._vpio, "has_write_10ms", False)
 
     async def start(self, frame: StartFrame):
-        # Initialize base (sample rate, chunking) and register media sender(s)
+        # Initialize base (sample rate, chunking)
         await super().start(frame)
-        await self.set_transport_ready(frame)
-        # Notify parent that output is ready
+        # Ensure the underlying VPIO engine is running
         try:
-            await self._parent._on_output_ready()
+            await self._parent._ensure_stream_started()
         except Exception:
-            logger.exception("Error notifying parent of output ready")
+            logger.exception("Error starting VPIO stream for output")
         # Start C-paced playback thread if available; else fall back to Python pacer
         if self._has_play_thread and self._has_write_10ms:
             # Configure headroom and start thread
@@ -343,6 +347,13 @@ class MacOutputTransport(BaseOutputTransport):
             self._play_task = self.create_task(self._playback_pacer())
         if os.getenv("VPIO_DEBUG"):
             self._metrics_task = self.create_task(self._pacer_metrics())
+        # Register media senders after playback is ready
+        await self.set_transport_ready(frame)
+        # Notify parent that output is ready after playback path is established
+        try:
+            await self._parent._on_output_ready()
+        except Exception:
+            logger.exception("Error notifying parent of output ready")
 
     async def stop(self, frame):
         if self._play_task:
@@ -387,19 +398,26 @@ class MacOutputTransport(BaseOutputTransport):
         if not frame.audio:
             return
         # Validate frame matches our configured output format; log anomalies once/second
+        now = asyncio.get_running_loop().time()
+        if not hasattr(self, "_warn_ts"):
+            self._warn_ts = 0.0
         try:
             if frame.sample_rate and frame.sample_rate != self.sample_rate:
-                logger.warning(
-                    f"Output frame SR mismatch: frame={frame.sample_rate} transport={self.sample_rate}"
-                )
+                if now - self._warn_ts >= 1.0:
+                    logger.warning(
+                        f"Output frame SR mismatch: frame={frame.sample_rate} transport={self.sample_rate}"
+                    )
+                    self._warn_ts = now
         except Exception:
             pass
         try:
             expected_10ms = int(self.sample_rate / 100) * self._params.audio_out_channels * 2
-            if len(frame.audio) != expected_10ms:
-                logger.warning(
-                    f"Unexpected frame size: len={len(frame.audio)} expected10ms={expected_10ms}"
-                )
+            if len(frame.audio) % expected_10ms != 0:
+                if now - self._warn_ts >= 1.0:
+                    logger.warning(
+                        f"Unexpected frame size: len={len(frame.audio)} not a multiple of 10ms={expected_10ms}"
+                    )
+                    self._warn_ts = now
         except Exception:
             pass
         if self._has_play_thread and self._has_write_10ms:
@@ -531,6 +549,12 @@ class MacOutputTransport(BaseOutputTransport):
 
 
 class LocalMacTransport(BaseTransport):
+    """Local macOS transport using VoiceProcessingIO (VPIO).
+
+    Registers on_client_connected and on_client_disconnected like network
+    transports. For local use, the "client" argument passed to handlers is
+    None by design.
+    """
     def __init__(self, params: LocalMacTransportParams, lib_path: Optional[str] = None):
         super().__init__()
         if not _is_macos():
@@ -554,17 +578,8 @@ class LocalMacTransport(BaseTransport):
         self._ready_sides: Set[str] = set()
         self._connected_emitted: bool = False
         self._disconnected_emitted: bool = False
-        # Start VPIO engine streaming
-        sr = params.audio_in_sample_rate or 16000
-        ch = params.audio_in_channels
-        cap_bytes = int(
-            (params.ring_capacity_secs if hasattr(params, "ring_capacity_secs") else 2.0)
-            * sr
-            * ch
-            * 2
-        )
-        if not self._vpio.start_stream(sr, ch, cap_bytes):
-            raise RuntimeError("Failed to start VPIO stream")
+        # Defer starting the VPIO engine until first start() of input/output.
+        self._stream_started: bool = False
         self._input: Optional[MacInputTransport] = None
         self._output: Optional[MacOutputTransport] = None
 
@@ -628,3 +643,27 @@ class LocalMacTransport(BaseTransport):
                 await self._call_event_handler("on_client_disconnected", None)
             except Exception:
                 logger.exception("Exception in on_client_disconnected handler")
+
+    async def _ensure_stream_started(self):
+        if self._stream_started:
+            return
+        sr = self._params.audio_in_sample_rate or 16000
+        ch = self._params.audio_in_channels
+        cap_bytes = int(
+            (self._params.ring_capacity_secs if hasattr(self._params, "ring_capacity_secs") else 2.0)
+            * sr
+            * ch
+            * 2
+        )
+        if not self._vpio.start_stream(sr, ch, cap_bytes):
+            raise RuntimeError("Failed to start VPIO stream")
+        self._stream_started = True
+
+    async def cleanup(self):
+        await super().cleanup()
+        if self._stream_started:
+            try:
+                self._vpio.stop_stream()
+            except Exception:
+                pass
+            self._stream_started = False
