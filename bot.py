@@ -1,5 +1,6 @@
 import asyncio
 import os
+import traceback
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -26,6 +27,11 @@ load_dotenv(override=True)
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
+    try:
+        stack = "".join(traceback.format_stack())
+        logger.warning("run_bot() invoked. Full call stack follows:\n" + stack)
+    except Exception:
+        pass
     logger.info("Starting bot with Gemini TTS")
 
     stt_speechmatics = SpeechmaticsSTTService(
@@ -73,6 +79,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             context_aggregator.assistant(),  # Assistant spoken responses
         ]
     )
+    logger.warning(f"run_bot(): constructed Pipeline object id={id(pipeline)}")
 
     task = PipelineTask(
         pipeline,
@@ -83,8 +90,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         observers=[RTVIObserver(rtvi)],
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
     )
+    logger.warning(f"run_bot(): constructed PipelineTask name={task.name} id={id(task)}")
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
+    logger.warning(f"run_bot(): constructed PipelineRunner name={runner.name} id={id(runner)}")
 
     await runner.run(task)
 

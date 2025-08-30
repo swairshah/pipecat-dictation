@@ -17,6 +17,7 @@ dependencies = [
     "python-xlib",
     "pynput",
     "pyperclip",
+    "textual",
 ]
 
 [tool.uv.sources]

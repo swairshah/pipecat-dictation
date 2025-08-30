@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
-from typing import Optional, Set
+from typing import Any, Optional, Set
 
 from loguru import logger
 
@@ -12,6 +12,8 @@ from pipecat.frames.frames import (
     OutputAudioRawFrame,
     StartFrame,
     StartInterruptionFrame,
+    TransportMessageFrame,
+    TransportMessageUrgentFrame,
 )
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.transports.base_input import BaseInputTransport
@@ -294,6 +296,15 @@ class MacInputTransport(BaseInputTransport):
                 logger.warning(f"VPIO poll error: {e}")
                 await asyncio.sleep(0.02)
 
+    async def push_app_message(self, message: Any):
+        """Push an application message into the input side of the pipeline.
+
+        Mirrors SmallWebRTCInputTransport semantics: wrap as
+        TransportMessageUrgentFrame and push upstream immediately.
+        """
+        frame = TransportMessageUrgentFrame(message=message)
+        await self.push_frame(frame)
+
 
 class MacOutputTransport(BaseOutputTransport):
     _params: LocalMacTransportParams
@@ -546,6 +557,13 @@ class MacOutputTransport(BaseOutputTransport):
             except Exception:
                 pass
         await super().process_frame(frame, direction)
+    
+    async def send_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
+        # Forward to parent so observers (e.g., TUI) can receive transport messages
+        try:
+            await self._parent._on_transport_message(frame)
+        except Exception:
+            logger.exception("Error emitting transport message")
 
 
 class LocalMacTransport(BaseTransport):
@@ -564,9 +582,11 @@ class LocalMacTransport(BaseTransport):
         logger.info(
             f"Loaded VPIO helper: {self._vpio.path} (streaming={'yes' if self._vpio.has_stream else 'no'})"
         )
-        # Register compatible connection events
+        # Register compatible connection & message events
         self._register_event_handler("on_client_connected")
         self._register_event_handler("on_client_disconnected")
+        self._register_event_handler("on_app_message")
+        self._register_event_handler("on_transport_message")
 
         # Track readiness of sides
         required: Set[str] = set()
@@ -667,3 +687,19 @@ class LocalMacTransport(BaseTransport):
             except Exception:
                 pass
             self._stream_started = False
+
+    # Application messaging (simulated in-process app <-> transport link)
+    async def send_app_message(self, message: Any):
+        """Send an application message into the pipeline and emit event.
+
+        Matches SmallWebRTC semantics: requires input to be ready; does not
+        create processors implicitly.
+        """
+        if self._input is None or not self._connected_emitted:
+            raise RuntimeError("Transport input not ready; cannot send app message")
+        await self._input.push_app_message(message)
+        await self._call_event_handler("on_app_message", message)
+
+    async def _on_transport_message(self, frame: TransportMessageFrame | TransportMessageUrgentFrame):
+        """Emit outgoing transport messages for the TUI/app to consume."""
+        await self._call_event_handler("on_transport_message", frame)
