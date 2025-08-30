@@ -9,7 +9,7 @@ dependencies = [
     "fastapi[all]",
     "uvicorn",
     "opencv-python",
-    "pipecat-ai[openai,webrtc,silero,local,google,speechmatics,cartesia,deepgram]==0.0.82",
+    "pipecat-ai[openai,webrtc,silero,local,google,speechmatics,cartesia,deepgram,daily]==0.0.82",
     "pipecat-ai-small-webrtc-prebuilt",
     "aiortc",
     "nltk",

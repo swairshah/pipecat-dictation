@@ -23,7 +23,7 @@ def _is_macos():
     return platform.system() == "Darwin"
 
 
-class LocalVPIOTransportParams(TransportParams):
+class LocalMacTransportParams(TransportParams):
     audio_in_sample_rate: Optional[int] = 16000
     audio_out_sample_rate: Optional[int] = 16000
     audio_in_channels: int = 1
@@ -41,7 +41,7 @@ class LocalVPIOTransportParams(TransportParams):
 class _VPIOLib:
     def __init__(self, lib_path: Optional[str] = None):
         if not _is_macos():
-            raise RuntimeError("LocalVPIOTransport only supported on macOS")
+            raise RuntimeError("LocalMacTransport only supported on macOS")
         import ctypes as C
 
         # Resolve dylib path
@@ -179,10 +179,10 @@ class _VPIOLib:
         self.lib.vpio_shutdown()
 
 
-class VPIOInputTransport(BaseInputTransport):
-    _params: LocalVPIOTransportParams
+class MacInputTransport(BaseInputTransport):
+    _params: LocalMacTransportParams
 
-    def __init__(self, vpio: _VPIOLib, params: LocalVPIOTransportParams, parent: "LocalVPIOTransport"):
+    def __init__(self, vpio: _VPIOLib, params: LocalMacTransportParams, parent: "LocalMacTransport"):
         super().__init__(params)
         self._vpio = vpio
         self._parent = parent
@@ -290,10 +290,10 @@ class VPIOInputTransport(BaseInputTransport):
                 await asyncio.sleep(0.02)
 
 
-class VPIOOutputTransport(BaseOutputTransport):
-    _params: LocalVPIOTransportParams
+class MacOutputTransport(BaseOutputTransport):
+    _params: LocalMacTransportParams
 
-    def __init__(self, vpio: _VPIOLib, params: LocalVPIOTransportParams, parent: "LocalVPIOTransport"):
+    def __init__(self, vpio: _VPIOLib, params: LocalMacTransportParams, parent: "LocalMacTransport"):
         super().__init__(params)
         self._vpio = vpio
         self._parent = parent
@@ -530,11 +530,11 @@ class VPIOOutputTransport(BaseOutputTransport):
         await super().process_frame(frame, direction)
 
 
-class LocalVPIOTransport(BaseTransport):
-    def __init__(self, params: LocalVPIOTransportParams, lib_path: Optional[str] = None):
+class LocalMacTransport(BaseTransport):
+    def __init__(self, params: LocalMacTransportParams, lib_path: Optional[str] = None):
         super().__init__()
         if not _is_macos():
-            raise RuntimeError("LocalVPIOTransport only supported on macOS")
+            raise RuntimeError("LocalMacTransport only supported on macOS")
         self._params = params
         self._vpio = _VPIOLib(lib_path)
         logger.info(
@@ -565,17 +565,17 @@ class LocalVPIOTransport(BaseTransport):
         )
         if not self._vpio.start_stream(sr, ch, cap_bytes):
             raise RuntimeError("Failed to start VPIO stream")
-        self._input: Optional[VPIOInputTransport] = None
-        self._output: Optional[VPIOOutputTransport] = None
+        self._input: Optional[MacInputTransport] = None
+        self._output: Optional[MacOutputTransport] = None
 
     def input(self) -> FrameProcessor:
         if not self._input:
-            self._input = VPIOInputTransport(self._vpio, self._params, self)
+            self._input = MacInputTransport(self._vpio, self._params, self)
         return self._input
 
     def output(self) -> FrameProcessor:
         if not self._output:
-            self._output = VPIOOutputTransport(self._vpio, self._params, self)
+            self._output = MacOutputTransport(self._vpio, self._params, self)
         return self._output
 
     # Internal helpers to emit connection lifecycle events

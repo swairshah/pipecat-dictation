@@ -17,9 +17,9 @@ from pipecat.services.speechmatics.stt import SpeechmaticsSTTService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
-from macos.local_vpio_transport import (
-    LocalVPIOTransport,
-    LocalVPIOTransportParams,
+from macos.local_mac_transport import (
+    LocalMacTransport,
+    LocalMacTransportParams,
 )
 
 load_dotenv(override=True)
@@ -92,10 +92,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 if __name__ == "__main__":
     logger.info("Using new AEC transport")
 
-    params = LocalVPIOTransportParams(
+    params = LocalMacTransportParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
         vad_analyzer=SileroVADAnalyzer(),
     )
-    transport = LocalVPIOTransport(params=params)
+    transport = LocalMacTransport(params=params)
     asyncio.run(run_bot(transport, RunnerArguments()))

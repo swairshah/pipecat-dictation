@@ -4,8 +4,9 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-
+import asyncio
 import os
+import sys
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -130,22 +131,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
     )
 
-    # Local-style transports (no external client connect) should start immediately.
-    is_local_style = os.getenv("TRANSPORT", "webrtc").lower() != "webrtc"
-    if is_local_style:
-        logger.info("Starting conversation ...")
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Client connected")
         await task.queue_frames([context_aggregator.user().get_context_frame()])
-    else:
 
-        @transport.event_handler("on_client_connected")
-        async def on_client_connected(transport, client):
-            logger.info("Client connected")
-            await task.queue_frames([context_aggregator.user().get_context_frame()])
-
-        @transport.event_handler("on_client_disconnected")
-        async def on_client_disconnected(transport, client):
-            logger.info("Client disconnected")
-            await task.cancel()
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("Client disconnected")
+        await task.cancel()
 
     # Register event handler for transcript updates
     @transcript.event_handler("on_transcript_update")
@@ -168,82 +162,25 @@ async def bot(runner_args: RunnerArguments):
 
 
 if __name__ == "__main__":
-    import asyncio
-    import os as _os
+    # look for '-t' 'local' in sys.argv and run the bot directly
+    if any(a == "-t" and b == "local" for a, b in zip(sys.argv, sys.argv[1:])):
+        print("Using local transport")
 
-    transport_env = _os.getenv("TRANSPORT", "webrtc").lower()
-    if transport_env == "local":
-        from pipecat.runner.types import RunnerArguments
-
-        # Use the built-in Pipecat local transport (PyAudio)
-        from pipecat.transports.local.audio import (
-            LocalAudioTransport,
-            LocalAudioTransportParams,
+        from macos.local_mac_transport import (
+            LocalMacTransport,
+            LocalMacTransportParams,
         )
+        from pipecat.audio.vad.silero import SileroVADAnalyzer
 
-        in_dev = _os.getenv("LOCAL_AUDIO_INPUT_DEVICE")
-        out_dev = _os.getenv("LOCAL_AUDIO_OUTPUT_DEVICE")
-        params = LocalAudioTransportParams(
+        params = LocalMacTransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            audio_in_sample_rate=16000,
-            audio_out_sample_rate=24000,
-            audio_in_channels=1,
-            audio_out_channels=1,
-            audio_out_10ms_chunks=4,  # 40ms
-            input_device_index=int(in_dev) if in_dev else None,
-            output_device_index=int(out_dev) if out_dev else None,
+            vad_analyzer=SileroVADAnalyzer(),
         )
-        transport = LocalAudioTransport(params=params)
+        transport = LocalMacTransport(params=params)
         asyncio.run(run_bot(transport, RunnerArguments()))
-    elif transport_env == "local-aec":
-        from pipecat.runner.types import RunnerArguments
-        from local_aec_transport import LocalAECTransport, LocalAECTransportParams
+        sys.exit(0)
 
-        in_dev = _os.getenv("LOCAL_AUDIO_INPUT_DEVICE")
-        out_dev = _os.getenv("LOCAL_AUDIO_OUTPUT_DEVICE")
-        params = LocalAECTransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            audio_in_sample_rate=16000,
-            audio_out_sample_rate=16000,  # use 16 kHz to avoid resampling
-            audio_in_channels=1,
-            audio_out_channels=1,
-            audio_out_10ms_chunks=4,  # 40ms
-            input_device_index=int(in_dev) if in_dev else None,
-            output_device_index=int(out_dev) if out_dev else None,
-            aec_enabled=True,
-            ns_enabled=True,
-            agc_enabled=False,
-            hpf_enabled=True,
-            aec_sample_rate=16000,
-        )
-        transport = LocalAECTransport(params=params)
-        asyncio.run(run_bot(transport, RunnerArguments()))
-    elif transport_env == "local-aec-mac":
-        logger.info("Using new AEC transport")
-
-        from pipecat.runner.types import RunnerArguments
-        from local_vpio_transport import (
-            LocalVPIOTransport,
-            LocalVPIOTransportParams,
-        )
-
-        params = LocalVPIOTransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            audio_in_sample_rate=16000,
-            audio_out_sample_rate=16000,
-            audio_in_channels=1,
-            audio_out_channels=1,
-            audio_out_10ms_chunks=1,  # 10ms frames
-            ring_capacity_secs=8.0,   # smaller base; staging grows dynamically
-            preroll_ms=40,
-            slice_ms=5,
-            playback_headroom_ms=10,
-        )
-        transport = LocalVPIOTransport(params=params)
-        asyncio.run(run_bot(transport, RunnerArguments()))
     else:
         from pipecat.runner.run import main
 
