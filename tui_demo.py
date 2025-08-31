@@ -20,22 +20,12 @@ from textual.widgets import Header, Footer, Static
 from textual.containers import Vertical, Horizontal
 
 from tui.core.base_app import BotTUIBase
+from tui.core.utils.imports import import_bot_module
 from tui.widgets.text_list_panel import TextListPanel
 from tui.widgets.input_bar import InputBar
 from tui.widgets.rtvi_list_panel import RTVIListPanel
 from tui.widgets.syslog_panel import SyslogPanel
 
-
-def import_bot_module(path_or_module: str) -> ModuleType:
-    if os.path.exists(path_or_module) and path_or_module.endswith(".py"):
-        spec = importlib.util.spec_from_file_location("bot_module", path_or_module)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Unable to import bot file: {path_or_module}")
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["bot_module"] = mod
-        spec.loader.exec_module(mod)  # type: ignore[attr-defined]
-        return mod
-    return importlib.import_module(path_or_module)
 
 
 class SimpleMessagesApp(BotTUIBase):
@@ -52,11 +42,6 @@ class SimpleMessagesApp(BotTUIBase):
         self._heartbeat_timer: Optional[Timer] = None
         # Signal to base that we provide our own titles for RTVI panes
         self._rtvi_titles = True
-        # One-time placeholders for empty RTVI lists
-        self._inbox_placeholder = None
-        self._outbox_placeholder = None
-        # One-time placeholder for main messages list
-        self._messages_placeholder = None
         self._last_messages_append_type: Optional[str] = None
 
     def compose(self) -> ComposeResult:  # type: ignore[override]
@@ -75,11 +60,9 @@ class SimpleMessagesApp(BotTUIBase):
             # Overlays used by base handlers/actions (with titles like tui.py)
             with Horizontal(id="rtvi_panes"):
                 with Vertical():
-                    yield Static("Inbound RTVI:")
                     self.rtvi_inbox = RTVIListPanel(id="inbox", classes="log")
                     yield self.rtvi_inbox
                 with Vertical():
-                    yield Static("Outbound RTVI:")
                     self.rtvi_outbox = RTVIListPanel(id="outbox", classes="log")
                     yield self.rtvi_outbox
             self.syslog = SyslogPanel(id="syslog", classes="log")
@@ -98,19 +81,16 @@ class SimpleMessagesApp(BotTUIBase):
             self.syslog and self.syslog.write_line("[info] SimpleMessagesApp mounted")
         except Exception:
             pass
-        # Add a one-time placeholder row to each RTVI list to force initial layout
+        # Insert in-list headers like tui.py and clear placeholders
         try:
             from textual.widgets import ListItem as _LI
 
-            if self.rtvi_inbox is not None and self._inbox_placeholder is None:
-                self._inbox_placeholder = _LI(Static("..."), classes="-placeholder")
-                await self.rtvi_inbox.append(self._inbox_placeholder)
-            if self.rtvi_outbox is not None and self._outbox_placeholder is None:
-                self._outbox_placeholder = _LI(Static("..."), classes="-placeholder")
-                await self.rtvi_outbox.append(self._outbox_placeholder)
-            if self.messages is not None and self._messages_placeholder is None:
-                self._messages_placeholder = _LI(Static("..."), classes="-placeholder")
-                await self.messages.append(self._messages_placeholder)
+            if self.rtvi_inbox is not None:
+                await self.rtvi_inbox.append(_LI(Static("Inbound RTVI:")))
+                self.rtvi_inbox.hide_placeholder()
+            if self.rtvi_outbox is not None:
+                await self.rtvi_outbox.append(_LI(Static("Outbound RTVI:")))
+                self.rtvi_outbox.hide_placeholder()
         except Exception:
             pass
         # No diagnostics heartbeat in normal runs
@@ -136,64 +116,46 @@ class SimpleMessagesApp(BotTUIBase):
             )
 
     async def _on_inbound(self, payload: Any) -> None:
-        # Hide placeholder on first inbound
-        try:
-            if self._inbox_placeholder is not None:
-                self._inbox_placeholder.display = False
-                self._inbox_placeholder = None
-        except Exception:
-            pass
         await super()._on_inbound(payload)
         await self._maybe_append_message(payload)
 
     async def _on_outbound(self, payload: Any) -> None:
-        # Hide placeholder on first outbound
-        try:
-            if self._outbox_placeholder is not None:
-                self._outbox_placeholder.display = False
-                self._outbox_placeholder = None
-        except Exception:
-            pass
         await super()._on_outbound(payload)
         await self._maybe_append_message(payload)
 
     async def _maybe_append_message(self, payload: Any) -> None:
-        """Append readable text for common RTVI payloads.
+        """Append User:/Bot: lines for common RTVI payloads.
 
-        - Prefer bot-transcription / bot-llm-text types with data.text
-        - Fallback: any dict with a top-level 'text' or data.text
-        - Ignore non-text payloads
+        - user-transcription (final): "User: …" (merge consecutive)
+        - bot-transcription: "Bot: …" (merge consecutive)
+        - bot-llm-text: "Bot: …"
         """
         try:
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or self.messages is None:
                 return
-            # Hide messages placeholder on first real item
-            try:
-                if self._messages_placeholder is not None:
-                    self._messages_placeholder.display = False
-                    self._messages_placeholder = None
-            except Exception:
-                pass
+            # Ensure placeholder is hidden on first real item
+            self.messages.hide_placeholder()
 
             t = payload.get("type")
-            text = payload.get("data", {}).get("text")
-            final = payload.get("data", {}).get("final")
+            data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+            text = data.get("text")
+            final = data.get("final")
+            if not isinstance(text, str):
+                return
+
             if t == "user-transcription" and final:
-                if self._last_messages_append_type == "user-transcription":
+                if self._last_messages_append_type == "User":
                     await self.messages.append_text_to_last_item(" " + text)
                 else:
                     await self.messages.append_text_item("User: " + text)
-                self._last_messages_append_type = "user-transcription"
-
+                self._last_messages_append_type = "User"
             elif t == "bot-transcription":
-                if self._last_messages_append_type == "bot-transcription":
-                    await self.messages.append_text_to_last_item(text)
+                if self._last_messages_append_type == "Bot":
+                    await self.messages.append_text_to_last_item(" " + text)
                 else:
                     await self.messages.append_text_item("Bot: " + text)
-                self._last_messages_append_type = "bot-transcription"
-            return
-        except Exception as e:
-            logger.exception("Failed to append message: ", e)
+                self._last_messages_append_type = "Bot"
+        except Exception:
             pass
 
     async def _on_input_submit(self, payload: Any) -> None:

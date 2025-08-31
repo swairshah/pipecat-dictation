@@ -57,6 +57,10 @@ class TransportManager:
             finally:
                 self.transport = None
 
+    async def stop(self) -> None:
+        """Alias for cleanup for semantic clarity."""
+        await self.cleanup()
+
     def on_status(self, callback: Callable[[bool], Awaitable[None] | None]) -> None:
         self._on_status.append(callback)
 

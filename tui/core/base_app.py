@@ -132,29 +132,10 @@ class BotTUIBase(App):
             self.status.update("Status: connected" if connected else "Status: disconnected")
 
     async def _on_inbound(self, payload: Any) -> None:
-        # Log a concise preview to help diagnose event flow
-        try:
-            preview = str(payload)
-            if len(preview) > 200:
-                preview = preview[:200] + "…"
-            logger.debug(f"RTVI inbound: {preview}")
-            if self.syslog is not None:
-                self.syslog.write_line(f"[rtvi] inbound: {preview}")
-        except Exception:
-            pass
         if self.rtvi_inbox:
             await self.rtvi_inbox.append_json(payload)
 
     async def _on_outbound(self, payload: Any) -> None:
-        try:
-            preview = str(payload)
-            if len(preview) > 200:
-                preview = preview[:200] + "…"
-            logger.debug(f"RTVI outbound: {preview}")
-            if self.syslog is not None:
-                self.syslog.write_line(f"[rtvi] outbound: {preview}")
-        except Exception:
-            pass
         if self.rtvi_outbox:
             await self.rtvi_outbox.append_json(payload)
 
@@ -165,11 +146,7 @@ class BotTUIBase(App):
         # Leaving log view should always return to main view; hide RTVI panes
         self.query_one("#rtvi_panes").display = False
         if not show_log:
-            # Focus input when returning to main
-            try:
-                self.set_focus(self.query_one("#input"))
-            except Exception:
-                pass
+            self.focus_input()
 
     async def action_toggle_rtvi(self) -> None:
         rtvi_panes = self.query_one("#rtvi_panes")
@@ -189,10 +166,20 @@ class BotTUIBase(App):
                 pass
         else:
             # Returning from RTVI view goes back to main
-            try:
-                self.set_focus(self.query_one("#input"))
-            except Exception:
-                pass
+            self.focus_input()
+
+    def focus_input(self) -> None:
+        try:
+            self.set_focus(self.query_one("#input"))
+        except Exception:
+            pass
+
+    def focus_syslog(self) -> None:
+        try:
+            if self.syslog is not None:
+                self.set_focus(self.syslog)
+        except Exception:
+            pass
 
     async def action_copy_selection(self) -> None:
         focused = self.focused

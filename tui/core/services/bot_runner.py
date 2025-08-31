@@ -53,15 +53,20 @@ class BotRunner:
         runner_args = RunnerArguments()
         sink = UILineBuffer(self._safe_syslog_write)
 
-        # Route loguru to syslog panel without disrupting existing sinks
+        # Route loguru to syslog panel and remove default stderr sinks to avoid leaks
         try:
+            try:
+                _loguru.remove()  # drop existing sinks so logs don't leak to terminal
+            except Exception:
+                pass
+
             def _log_sink(m: str):
                 try:
                     self._write_syslog_line(m.rstrip("\n"))
                 except Exception:
                     pass
 
-            self._loguru_sink_id = _loguru.add(_log_sink, level="DEBUG")  # type: ignore[attr-defined]
+            self._loguru_sink_id = _log_sink and _loguru.add(_log_sink, level="DEBUG")  # type: ignore[attr-defined]
         except Exception:
             self._loguru_sink_id = None  # type: ignore[attr-defined]
 
