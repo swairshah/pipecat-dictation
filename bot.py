@@ -1,6 +1,6 @@
 import asyncio
 import os
-import traceback
+from datetime import datetime
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -12,12 +12,20 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.runner.types import RunnerArguments
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport
 from pipecat.services.speechmatics.stt import SpeechmaticsSTTService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.cartesia.tts import CartesiaTTSService
-from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
+from pipecat.frames.frames import LLMRunFrame, LLMMessagesAppendFrame, BotInterruptionFrame
+from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frameworks.rtvi import (
+    RTVIConfig,
+    RTVIObserver,
+    RTVIProcessor,
+    RTVIUserTranscriptionMessage,
+)
 from macos.local_mac_transport import (
     LocalMacTransport,
     LocalMacTransportParams,
@@ -27,11 +35,6 @@ load_dotenv(override=True)
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
-    try:
-        stack = "".join(traceback.format_stack())
-        logger.warning("run_bot() invoked. Full call stack follows:\n" + stack)
-    except Exception:
-        pass
     logger.info("Starting bot with Gemini TTS")
 
     stt_speechmatics = SpeechmaticsSTTService(
@@ -44,10 +47,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     stt_deepgram = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
     stt = stt_deepgram
 
-    llm = GoogleLLMService(
+    llm_google = GoogleLLMService(
         api_key=os.getenv("GOOGLE_API_KEY"),
         model="gemini-2.5-flash",
     )
+    llm_openai = OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model="gpt-4.1",
+    )
+    llm = llm_openai
 
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
@@ -55,6 +63,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
 
     rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+    rtvi_observer = RTVIObserver(rtvi)
 
     # System message that instructs the AI on how to speak
     messages = [
@@ -79,7 +88,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             context_aggregator.assistant(),  # Assistant spoken responses
         ]
     )
-    logger.warning(f"run_bot(): constructed Pipeline object id={id(pipeline)}")
 
     task = PipelineTask(
         pipeline,
@@ -87,13 +95,47 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
-        observers=[RTVIObserver(rtvi)],
+        observers=[rtvi_observer],
         idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
     )
-    logger.warning(f"run_bot(): constructed PipelineTask name={task.name} id={id(task)}")
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        rtvi.set_bot_ready()
+        await task.queue_frames([LLMRunFrame()])
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        await task.cancel()
+
+    @rtvi.event_handler("on_client_message")
+    async def on_client_message(rtvi, message):
+        # called for rtvi-ai messages of type "client-message"
+        logger.info(f"!!! Client message: {message}")
+        if message.type == "llm-input":
+            messages = message.data.get("messages", [])
+            if len(messages) > 0:
+                text = messages[0].get("content", "")
+                await rtvi_observer.push_transport_message_urgent(
+                    RTVIUserTranscriptionMessage(
+                        data={
+                            "text": text,
+                            "user_id": "",
+                            "timestamp": str(datetime.now()),
+                            "final": True,
+                        }
+                    )
+                )
+                await rtvi.push_frame(BotInterruptionFrame(), FrameDirection.UPSTREAM)
+                await asyncio.sleep(0.1)
+                await task.queue_frames(
+                    [
+                        LLMMessagesAppendFrame(messages=message.data.get("messages", [])),
+                        LLMRunFrame(),
+                    ]
+                )
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-    logger.warning(f"run_bot(): constructed PipelineRunner name={runner.name} id={id(runner)}")
 
     await runner.run(task)
 

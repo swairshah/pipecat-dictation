@@ -26,8 +26,11 @@ class InputBar(Input):
             payload = {
                 "id": str(self._sent_id),
                 "label": "rtvi-ai",
-                "type": "input",
-                "data": {"text": text},
+                "type": "client-message",
+                "data": {"t": "llm-input", "d": {"messages": [{"role": "user", "content": text}]}},
+                # todo: standard, later
+                # "type": "append-to-context",
+                # "data": {"role": "user", "content": text, "run_immediately": True},
             }
         self._sent_id += 1
         res = self._on_submit(payload)
@@ -43,4 +46,3 @@ class InputBar(Input):
             return
         await self._emit_message(text)
         self.value = ""
-

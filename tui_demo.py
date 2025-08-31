@@ -50,6 +50,14 @@ class SimpleMessagesApp(BotTUIBase):
         self.messages: Optional[TextListPanel] = None
         self.input_bar: Optional[InputBar] = None
         self._heartbeat_timer: Optional[Timer] = None
+        # Signal to base that we provide our own titles for RTVI panes
+        self._rtvi_titles = True
+        # One-time placeholders for empty RTVI lists
+        self._inbox_placeholder = None
+        self._outbox_placeholder = None
+        # One-time placeholder for main messages list
+        self._messages_placeholder = None
+        self._last_messages_append_type: Optional[str] = None
 
     def compose(self) -> ComposeResult:  # type: ignore[override]
         # Build main layout and include overlays expected by base.
@@ -64,12 +72,16 @@ class SimpleMessagesApp(BotTUIBase):
             self.input_bar = InputBar(self._on_input_submit, id="input")
             yield self.input_bar
 
-            # Overlays used by base handlers/actions
+            # Overlays used by base handlers/actions (with titles like tui.py)
             with Horizontal(id="rtvi_panes"):
-                self.rtvi_inbox = RTVIListPanel(id="inbox", classes="log")
-                self.rtvi_outbox = RTVIListPanel(id="outbox", classes="log")
-                yield self.rtvi_inbox
-                yield self.rtvi_outbox
+                with Vertical():
+                    yield Static("Inbound RTVI:")
+                    self.rtvi_inbox = RTVIListPanel(id="inbox", classes="log")
+                    yield self.rtvi_inbox
+                with Vertical():
+                    yield Static("Outbound RTVI:")
+                    self.rtvi_outbox = RTVIListPanel(id="outbox", classes="log")
+                    yield self.rtvi_outbox
             self.syslog = SyslogPanel(id="syslog", classes="log")
             self.syslog.display = False
             yield self.syslog
@@ -86,18 +98,24 @@ class SimpleMessagesApp(BotTUIBase):
             self.syslog and self.syslog.write_line("[info] SimpleMessagesApp mounted")
         except Exception:
             pass
+        # Add a one-time placeholder row to each RTVI list to force initial layout
         try:
-            self._heartbeat_timer = self.set_interval(2.0, self._heartbeat)
+            from textual.widgets import ListItem as _LI
+
+            if self.rtvi_inbox is not None and self._inbox_placeholder is None:
+                self._inbox_placeholder = _LI(Static("..."), classes="-placeholder")
+                await self.rtvi_inbox.append(self._inbox_placeholder)
+            if self.rtvi_outbox is not None and self._outbox_placeholder is None:
+                self._outbox_placeholder = _LI(Static("..."), classes="-placeholder")
+                await self.rtvi_outbox.append(self._outbox_placeholder)
+            if self.messages is not None and self._messages_placeholder is None:
+                self._messages_placeholder = _LI(Static("..."), classes="-placeholder")
+                await self.messages.append(self._messages_placeholder)
         except Exception:
             pass
+        # No diagnostics heartbeat in normal runs
 
     async def on_unmount(self) -> None:  # type: ignore[override]
-        try:
-            if self._heartbeat_timer is not None:
-                self._heartbeat_timer.stop()
-                self._heartbeat_timer = None
-        except Exception:
-            pass
         logger.info("on_unmount(): UI is unmounting")
 
     async def on_ready(self) -> None:  # type: ignore[override]
@@ -111,27 +129,71 @@ class SimpleMessagesApp(BotTUIBase):
         await super()._on_status(connected)
         if self.input_bar:
             self.input_bar.disabled = not connected
+            self.input_bar.placeholder = (
+                "Type RTVI JSON or text and press Enter"
+                if connected
+                else "Waiting for connection..."
+            )
 
     async def _on_inbound(self, payload: Any) -> None:
+        # Hide placeholder on first inbound
+        try:
+            if self._inbox_placeholder is not None:
+                self._inbox_placeholder.display = False
+                self._inbox_placeholder = None
+        except Exception:
+            pass
         await super()._on_inbound(payload)
         await self._maybe_append_message(payload)
 
     async def _on_outbound(self, payload: Any) -> None:
+        # Hide placeholder on first outbound
+        try:
+            if self._outbox_placeholder is not None:
+                self._outbox_placeholder.display = False
+                self._outbox_placeholder = None
+        except Exception:
+            pass
         await super()._on_outbound(payload)
         await self._maybe_append_message(payload)
 
     async def _maybe_append_message(self, payload: Any) -> None:
+        """Append readable text for common RTVI payloads.
+
+        - Prefer bot-transcription / bot-llm-text types with data.text
+        - Fallback: any dict with a top-level 'text' or data.text
+        - Ignore non-text payloads
+        """
         try:
+            if not isinstance(payload, dict):
+                return
+            # Hide messages placeholder on first real item
+            try:
+                if self._messages_placeholder is not None:
+                    self._messages_placeholder.display = False
+                    self._messages_placeholder = None
+            except Exception:
+                pass
+
             t = payload.get("type")
-            if t not in ("bot-transcription", "bot-llm-text"):
-                return
             text = payload.get("data", {}).get("text")
-            if not isinstance(text, str):
-                return
-            prefix = "ASR" if t == "bot-transcription" else "LLM"
-            if self.messages:
-                await self.messages.append_text(f"[{prefix}] {text}")
-        except Exception:
+            final = payload.get("data", {}).get("final")
+            if t == "user-transcription" and final:
+                if self._last_messages_append_type == "user-transcription":
+                    await self.messages.append_text_to_last_item(" " + text)
+                else:
+                    await self.messages.append_text_item("User: " + text)
+                self._last_messages_append_type = "user-transcription"
+
+            elif t == "bot-transcription":
+                if self._last_messages_append_type == "bot-transcription":
+                    await self.messages.append_text_to_last_item(text)
+                else:
+                    await self.messages.append_text_item("Bot: " + text)
+                self._last_messages_append_type = "bot-transcription"
+            return
+        except Exception as e:
+            logger.exception("Failed to append message: ", e)
             pass
 
     async def _on_input_submit(self, payload: Any) -> None:
@@ -140,11 +202,7 @@ class SimpleMessagesApp(BotTUIBase):
         except Exception as e:
             self.syslog and self.syslog.write_line(f"[error] Failed to send app message: {e}")
 
-    def _heartbeat(self) -> None:
-        try:
-            self.syslog and self.syslog.write_line("[debug] heartbeat")
-        except Exception:
-            pass
+    # No heartbeat: cleaned up
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -154,13 +212,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception:
         pass
     logger.add(sys.stderr, level="INFO")
-    logger.add("tui_demo.app.log", level="DEBUG", backtrace=True, diagnose=True, rotation="1 MB", retention=5)
+    logger.add(
+        "tui_demo.app.log",
+        level="DEBUG",
+        backtrace=True,
+        diagnose=True,
+        rotation="1 MB",
+        retention=5,
+    )
 
     parser = argparse.ArgumentParser(description="Simple messages TUI app")
     g = parser.add_mutually_exclusive_group(required=True)
     g.add_argument("--bot", help="Python module path, e.g. my_pkg.my_bot")
     g.add_argument("--file", help="Path to a bot Python file, e.g. ./bot.py")
-    parser.add_argument("--inline", action="store_true", help="Run Textual in inline mode for debugging")
+    parser.add_argument(
+        "--inline", action="store_true", help="Run Textual in inline mode for debugging"
+    )
     args = parser.parse_args(argv)
 
     mod = import_bot_module(args.bot or args.file)
@@ -193,4 +260,3 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

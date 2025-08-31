@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Optional
 
 import os
@@ -22,8 +21,15 @@ class BotTUIBase(App):
     Screen { layout: vertical; }
     #status { height: 3; border: round $accent; padding: 0 1; }
     #panes { layout: horizontal; height: 1fr; }
+    /* RTVI overlay panes */
+    #rtvi_panes { layout: horizontal; height: 1fr; }
+    #rtvi_panes > Vertical { height: 1fr; }
     .log { border: round $primary; height: 1fr; }
     #input { border: round $secondary; }
+
+    /* Messages panel tweaks: thin border + light padding per item */
+    #messages { border: solid $primary; }
+    #messages ListItem { padding: 1 1 0 1; }
 
     #outbox ListItem { padding: 0; }
     #outbox Collapsible { padding-left: 0; padding-bottom: 0; border: none; }
@@ -34,6 +40,8 @@ class BotTUIBase(App):
         text-style: $block-cursor-text-style;
     }
 
+    #inbox { height: 1fr; }
+    #outbox { height: 1fr; }
     #inbox ListItem { padding: 0; }
     #inbox Collapsible { padding-left: 0; padding-bottom: 0; border: none; }
     #inbox CollapsibleTitle { padding: 0 1; height: 1; }
@@ -98,11 +106,23 @@ class BotTUIBase(App):
             await self.bot_runner.start(self.transport_mgr.transport)
             logger.debug("Base on_mount: bot runner started")
 
-        if self.rtvi_inbox and self.rtvi_outbox:
-            await self.rtvi_inbox.append(ListItem(Static("Inbound RTVI:")))
-            await self.rtvi_outbox.append(ListItem(Static("Outbound RTVI:")))
+        # Ensure RTVI panels are wired even if subclass compose created them
+        try:
+            if not self.rtvi_inbox:
+                self.rtvi_inbox = self.query_one("#inbox", RTVIListPanel)  # type: ignore[assignment]
+            if not self.rtvi_outbox:
+                self.rtvi_outbox = self.query_one("#outbox", RTVIListPanel)  # type: ignore[assignment]
+        except Exception:
+            pass
+        if getattr(self, "_rtvi_titles", False):
+            # App supplies its own titles; skip list headers
+            pass
         else:
-            logger.warning("Base on_mount: RTVI panels not found; skipping headers")
+            if self.rtvi_inbox and self.rtvi_outbox:
+                await self.rtvi_inbox.append(ListItem(Static("Inbound RTVI:")))
+                await self.rtvi_outbox.append(ListItem(Static("Outbound RTVI:")))
+            else:
+                logger.debug("Base on_mount: RTVI panels not found; skipping headers")
 
         self.query_one("#rtvi_panes").display = False
         logger.debug("Base on_mount: initial UI state set")
@@ -112,24 +132,67 @@ class BotTUIBase(App):
             self.status.update("Status: connected" if connected else "Status: disconnected")
 
     async def _on_inbound(self, payload: Any) -> None:
+        # Log a concise preview to help diagnose event flow
+        try:
+            preview = str(payload)
+            if len(preview) > 200:
+                preview = preview[:200] + "…"
+            logger.debug(f"RTVI inbound: {preview}")
+            if self.syslog is not None:
+                self.syslog.write_line(f"[rtvi] inbound: {preview}")
+        except Exception:
+            pass
         if self.rtvi_inbox:
             await self.rtvi_inbox.append_json(payload)
 
     async def _on_outbound(self, payload: Any) -> None:
+        try:
+            preview = str(payload)
+            if len(preview) > 200:
+                preview = preview[:200] + "…"
+            logger.debug(f"RTVI outbound: {preview}")
+            if self.syslog is not None:
+                self.syslog.write_line(f"[rtvi] outbound: {preview}")
+        except Exception:
+            pass
         if self.rtvi_outbox:
             await self.rtvi_outbox.append_json(payload)
 
     async def action_toggle_log(self) -> None:
         assert self.syslog is not None
-        self.syslog.display = not self.syslog.display
-        self.query_one("#rtvi_panes").display = not self.syslog.display
+        show_log = not self.syslog.display
+        self.syslog.display = show_log
+        # Leaving log view should always return to main view; hide RTVI panes
+        self.query_one("#rtvi_panes").display = False
+        if not show_log:
+            # Focus input when returning to main
+            try:
+                self.set_focus(self.query_one("#input"))
+            except Exception:
+                pass
 
     async def action_toggle_rtvi(self) -> None:
         rtvi_panes = self.query_one("#rtvi_panes")
-        rtvi_panes.display = not rtvi_panes.display
+        show = not rtvi_panes.display
+        rtvi_panes.display = show
         assert self.syslog is not None
-        if rtvi_panes.display:
+        if show:
             self.syslog.display = False
+            # Force a layout pass so empty ListViews become visible when shown
+            try:
+                rtvi_panes.refresh(layout=True)
+                if self.rtvi_inbox is not None:
+                    self.rtvi_inbox.refresh(layout=True)
+                if self.rtvi_outbox is not None:
+                    self.rtvi_outbox.refresh(layout=True)
+            except Exception:
+                pass
+        else:
+            # Returning from RTVI view goes back to main
+            try:
+                self.set_focus(self.query_one("#input"))
+            except Exception:
+                pass
 
     async def action_copy_selection(self) -> None:
         focused = self.focused
@@ -143,7 +206,9 @@ class BotTUIBase(App):
                         text, _ = res
                         if text:
                             if copy_text(text):
-                                self.syslog and self.syslog.write_line("[info] Copied selection to clipboard")
+                                self.syslog and self.syslog.write_line(
+                                    "[info] Copied selection to clipboard"
+                                )
                                 return
                 except Exception:
                     pass
