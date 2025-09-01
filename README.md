@@ -30,6 +30,18 @@ Try saying:
 - "Use the current window as the target window and name it terminal"
 - "Let's test, send hello world to the terminal"
 
+A TUI for macOS
+
+```
+uv run tui_dicatation.py --file bot-realtime-api.py
+```
+
+This has:
+1. A local transport for macOS with echo cancellation (macos/local_mac_transport.py)
+2. Some semi-reusable components for voice agent TUIs. (In the tui directory.)
+
+At some point I'll pull both of these out into their own repos and maybe make Python packages for them. I like TUIs. :-)
+
 ## How It Works
 
 The bot is a [Pipecat](https://pipecat.ai) voice agent that uses OpenAI's Realtime API and a few window management tools. You can use other models and different pipeline designs if you want to! Smaller/older models require different prompting and, in general, can't handle as much ambiguity in conversation flow and instructions.
@@ -37,6 +49,32 @@ The bot is a [Pipecat](https://pipecat.ai) voice agent that uses OpenAI's Realti
 We run the bot process locally and connect to it via a [serverless WebRTC](https://docs.pipecat.ai/server/services/transport/small-webrtc) connection. We use WebRTC for flexibility and because Pipecat comes with a bunch of helpful [client-side SDK tooling](https://github.com/pipecat-ai/voice-ui-kit). (For example, we get echo cancellation and a simple developer playground UI by using the pipecat-ai-small-webrtc-prebuilt Python package and connecting via the browser.)
 
 The bot loads instructions from [prompt-realtime-api.txt](./prompt-realtime-api.txt). The current version of the prompt was largely written by GPT-5.
+
+## Local macOS transport (optional)
+
+If you don’t want to use WebRTC for local testing on macOS, this repo includes a local transport that uses Apple’s VoiceProcessingIO (VPIO) audio unit for capture/playback with built‑in echo cancellation and noise reduction.
+
+- File: `macos/local_mac_transport.py`
+- Helper: `macos/vpio_helper.c` (compiled into `macos/libvpio.dylib`)
+
+Build the helper once:
+
+```bash
+# Requires Xcode Command Line Tools
+clang -dynamiclib -o macos/libvpio.dylib macos/vpio_helper.c \
+  -framework AudioToolbox -framework AudioUnit
+```
+
+Run the bot with the local transport:
+
+```bash
+uv run bot-realtime-api.py -t local
+```
+
+Notes:
+- The transport loads `macos/libvpio.dylib` by default. You can override with `VPIO_LIB=/path/to/libvpio.dylib`.
+- Set `VPIO_DEBUG=1` to log pacing/underflow metrics once per second.
+- Audio format is 16‑bit PCM mono at the configured sample rate (defaults to 16 kHz). The helper runs a small C pacing thread for low‑latency playback.
 
 ## Platform specific notes
 

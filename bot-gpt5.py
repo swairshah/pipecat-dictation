@@ -20,30 +20,26 @@ from pipecat_window_functions import (
     remember_window_schema,
     send_text_to_window_schema,
 )
-from pipecat.frames.frames import TranscriptionMessage, StartFrame, StopFrame
-from pipecat.processors.frame_processor import FrameDirection
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.processors.transcript_processor import TranscriptProcessor
+from pipecat.services.openai.base_llm import BaseOpenAILLMService
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.openai_realtime_beta import (
-    InputAudioNoiseReduction,
-    InputAudioTranscription,
-    OpenAIRealtimeBetaLLMService,
-    SemanticTurnDetection,
-    SessionProperties,
-)
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.openai.stt import OpenAISTTService
+from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
-
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.frames.frames import StopFrame, StartFrame, LLMRunFrame
+from pipecat.processors.frame_processor import FrameDirection
 
 load_dotenv(override=True)
 
 # Load system instruction from file
-with open("prompt-realtime-api.txt", "r") as f:
+with open("prompt-gpt5.txt", "r") as f:
     SYSTEM_INSTRUCTION = f.read()
 
 # SYSTEM_INSTRUCTION = "Be a helpful assistant."
@@ -65,29 +61,44 @@ transport_params = {
     "webrtc": lambda: TransportParams(
         audio_in_enabled=True,
         audio_out_enabled=True,
+        vad_analyzer=SileroVADAnalyzer(),
     ),
 }
+
+
+# Arguably this should be the default
+class TTSNoEmptyStrings(OpenAITTSService):
+    async def run_tts(self, text: str):
+        logger.info(f"[TTS] Running TTS for text: {text}")
+        # strip whitespace and punctuation
+        text = text.strip().strip(".,;:!?'-\"‘’“”()[]{}")
+        # if text is empty, skip
+        if not text:
+            logger.info("[TTS] Skipping empty text")
+            return
+
+        async for chunk in super().run_tts(text):
+            yield chunk
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info("Starting bot")
 
-    session_properties = SessionProperties(
-        input_audio_transcription=InputAudioTranscription(),
-        # Set openai TurnDetection parameters. Not setting this at all will turn it
-        # on by default
-        turn_detection=SemanticTurnDetection(),
-        # Or set to False to disable openai turn detection and use transport VAD
-        # turn_detection=False,
-        input_audio_noise_reduction=InputAudioNoiseReduction(type="near_field"),
-        instructions=SYSTEM_INSTRUCTION,
-    )
-
-    llm = OpenAIRealtimeBetaLLMService(
+    stt = OpenAISTTService(
         api_key=os.getenv("OPENAI_API_KEY"),
-        session_properties=session_properties,
-        start_audio_paused=False,
-        model="gpt-realtime",
+    )
+    llm = OpenAILLMService(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        model="gpt-5",
+        params=BaseOpenAILLMService.InputParams(
+            extra={
+                "service_tier": "priority",
+                "reasoning_effort": "minimal",
+            },
+        ),
+    )
+    tts = TTSNoEmptyStrings(
+        api_key=os.getenv("OPENAI_API_KEY"),
     )
 
     # Register window control functions
@@ -95,16 +106,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     llm.register_function("remember_window", handle_remember_window)
     llm.register_function("send_text_to_window", handle_send_text_to_window)
 
-    transcript = TranscriptProcessor()
-
     # Create a standard OpenAI LLM context object using the normal messages format. The
     # OpenAIRealtimeBetaLLMService will convert this internally to messages that the
     # openai WebSocket API can understand.
     context = OpenAILLMContext(
-        [{"role": "user", "content": "Say hello!"}],
+        [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": "Say hello!"},
+        ],
         tools,
     )
-
     context_aggregator = llm.create_context_aggregator(context)
 
     rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
@@ -112,12 +123,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     pipeline = Pipeline(
         [
             transport.input(),  # Transport user input
-            context_aggregator.user(),
             rtvi,
-            llm,  # LLM
-            transcript.user(),  # Placed after the LLM, as LLM pushes TranscriptionFrames downstream
-            transport.output(),  # Transport bot output
-            transcript.assistant(),  # After the transcript output, to time with the audio output
+            stt,
+            context_aggregator.user(),
+            llm,
+            tts,
+            transport.output(),
             context_aggregator.assistant(),
         ]
     )
@@ -135,61 +146,22 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("Client connected")
-        await task.queue_frames([context_aggregator.user().get_context_frame()])
+        await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
         await task.cancel()
 
-    # Handle client-message mute/unmute from TUI
-    @transport.event_handler("on_app_message")
-    async def on_app_message(_transport, message):  # noqa: ANN001
-        try:
-            if not isinstance(message, dict):
-                return
-            if message.get("type") != "client-message":
-                return
-            data = message.get("data") or {}
-            if data.get("t") != "llm-input":
-                return
-            d = data.get("d") or {}
-            if d.get("type") != "mute-unmute":
-                return
-            mute = bool(d.get("mute"))
-            if mute:
-                await transport.input().process_frame(StopFrame(), FrameDirection.DOWNSTREAM)
-                logger.info("Input muted via client-message")
-            else:
-                await transport.input().process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
-                logger.info("Input unmuted via client-message")
-        except Exception:
-            logger.exception("Error handling client-message (mute-unmute)")
-
-    # Register event handler for transcript updates
-    @transcript.event_handler("on_transcript_update")
-    async def on_transcript_update(processor, frame):
-        for msg in frame.messages:
-            if isinstance(msg, TranscriptionMessage):
-                timestamp = f"[{msg.timestamp}] " if msg.timestamp else ""
-                line = f"{timestamp}{msg.role}: {msg.content}"
-                logger.info(f"Transcript: {line}")
-
-    # Also support typed client messages surfaced via RTVI
     @rtvi.event_handler("on_client_message")
     async def on_client_message(rtvi, message):
-        try:
-            if getattr(message, "type", None) != "mute-unmute":
-                return
-            mute = bool(getattr(message, "data", {}).get("mute"))
+        logger.info(f"!!! Client message: {message}")
+        if message.type == "mute-unmute":
+            mute = message.data.get("mute", True)
             if mute:
                 await transport.input().process_frame(StopFrame(), FrameDirection.DOWNSTREAM)
-                logger.info("Input muted via RTVI client-message")
             else:
                 await transport.input().process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
-                logger.info("Input unmuted via RTVI client-message")
-        except Exception:
-            logger.exception("Error handling RTVI client-message (mute-unmute)")
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
 
