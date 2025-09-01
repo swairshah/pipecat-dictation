@@ -20,7 +20,8 @@ from pipecat_window_functions import (
     remember_window_schema,
     send_text_to_window_schema,
 )
-from pipecat.frames.frames import TranscriptionMessage
+from pipecat.frames.frames import TranscriptionMessage, StartFrame, StopFrame
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -42,10 +43,10 @@ from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIPro
 load_dotenv(override=True)
 
 # Load system instruction from file
-# with open("prompt-realtime-api.txt", "r") as f:
-#     SYSTEM_INSTRUCTION = f.read()
+with open("prompt-realtime-api.txt", "r") as f:
+    SYSTEM_INSTRUCTION = f.read()
 
-SYSTEM_INSTRUCTION = "Be a helpful assistant."
+# SYSTEM_INSTRUCTION = "Be a helpful assistant."
 
 # Create tools schema with window control functions
 tools = ToolsSchema(
@@ -141,6 +142,30 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         logger.info("Client disconnected")
         await task.cancel()
 
+    # Handle client-message mute/unmute from TUI
+    @transport.event_handler("on_app_message")
+    async def on_app_message(_transport, message):  # noqa: ANN001
+        try:
+            if not isinstance(message, dict):
+                return
+            if message.get("type") != "client-message":
+                return
+            data = message.get("data") or {}
+            if data.get("t") != "llm-input":
+                return
+            d = data.get("d") or {}
+            if d.get("type") != "mute-unmute":
+                return
+            mute = bool(d.get("mute"))
+            if mute:
+                await transport.input().process_frame(StopFrame(), FrameDirection.DOWNSTREAM)
+                logger.info("Input muted via client-message")
+            else:
+                await transport.input().process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
+                logger.info("Input unmuted via client-message")
+        except Exception:
+            logger.exception("Error handling client-message (mute-unmute)")
+
     # Register event handler for transcript updates
     @transcript.event_handler("on_transcript_update")
     async def on_transcript_update(processor, frame):
@@ -149,6 +174,22 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 timestamp = f"[{msg.timestamp}] " if msg.timestamp else ""
                 line = f"{timestamp}{msg.role}: {msg.content}"
                 logger.info(f"Transcript: {line}")
+
+    # Also support typed client messages surfaced via RTVI
+    @rtvi.event_handler("on_client_message")
+    async def on_client_message(rtvi, message):
+        try:
+            if getattr(message, "type", None) != "mute-unmute":
+                return
+            mute = bool(getattr(message, "data", {}).get("mute"))
+            if mute:
+                await transport.input().process_frame(StopFrame(), FrameDirection.DOWNSTREAM)
+                logger.info("Input muted via RTVI client-message")
+            else:
+                await transport.input().process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
+                logger.info("Input unmuted via RTVI client-message")
+        except Exception:
+            logger.exception("Error handling RTVI client-message (mute-unmute)")
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
 

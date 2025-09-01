@@ -22,7 +22,6 @@ from pipecat_window_functions import (
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
@@ -34,11 +33,13 @@ from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.frames.frames import StopFrame, StartFrame, LLMRunFrame
+from pipecat.processors.frame_processor import FrameDirection
 
 load_dotenv(override=True)
 
 # Load system instruction from file
-with open("prompt-realtime-api.txt", "r") as f:
+with open("prompt-gpt5.txt", "r") as f:
     SYSTEM_INSTRUCTION = f.read()
 
 # SYSTEM_INSTRUCTION = "Be a helpful assistant."
@@ -151,6 +152,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
         await task.cancel()
+
+    @rtvi.event_handler("on_client_message")
+    async def on_client_message(rtvi, message):
+        logger.info(f"!!! Client message: {message}")
+        if message.type == "mute-unmute":
+            mute = message.data.get("mute", True)
+            if mute:
+                await transport.input().process_frame(StopFrame(), FrameDirection.DOWNSTREAM)
+            else:
+                await transport.input().process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
 

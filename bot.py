@@ -26,6 +26,7 @@ from pipecat.processors.frameworks.rtvi import (
     RTVIProcessor,
     RTVIUserTranscriptionMessage,
 )
+from pipecat.frames.frames import StartFrame, StopFrame
 from macos.local_mac_transport import (
     LocalMacTransport,
     LocalMacTransportParams,
@@ -112,28 +113,56 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_message(rtvi, message):
         # called for rtvi-ai messages of type "client-message"
         logger.info(f"!!! Client message: {message}")
-        if message.type == "llm-input":
-            messages = message.data.get("messages", [])
-            if len(messages) > 0:
-                text = messages[0].get("content", "")
-                await rtvi_observer.push_transport_message_urgent(
-                    RTVIUserTranscriptionMessage(
-                        data={
-                            "text": text,
-                            "user_id": "",
-                            "timestamp": str(datetime.now()),
-                            "final": True,
-                        }
+        # New style: typed client messages surfaced via RTVI as message.type
+        if getattr(message, "type", None) == "mute-unmute":
+            try:
+                mute = bool(getattr(message, "data", {}).get("mute"))
+                if mute:
+                    await transport.input().process_frame(StopFrame(), FrameDirection.DOWNSTREAM)
+                    logger.info("Input muted via client-message (typed)")
+                else:
+                    await transport.input().process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
+                    logger.info("Input unmuted via client-message (typed)")
+            except Exception:
+                logger.exception("Failed to toggle mute from client-message (typed)")
+        elif message.type == "llm-input":
+            # Two shapes supported:
+            # 1) { messages: [...] } for direct LLM message injection
+            # 2) { type: "mute-unmute", mute: true|false } for input control
+            d = message.data or {}
+            if isinstance(d, dict) and d.get("type") == "mute-unmute":
+                try:
+                    mute = bool(d.get("mute"))
+                    if mute:
+                        await transport.input().process_frame(StopFrame(), FrameDirection.DOWNSTREAM)
+                        logger.info("Input muted via client-message")
+                    else:
+                        await transport.input().process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
+                        logger.info("Input unmuted via client-message")
+                except Exception:
+                    logger.exception("Failed to toggle mute from client-message")
+            else:
+                messages = d.get("messages", [])
+                if len(messages) > 0:
+                    text = messages[0].get("content", "")
+                    await rtvi_observer.push_transport_message_urgent(
+                        RTVIUserTranscriptionMessage(
+                            data={
+                                "text": text,
+                                "user_id": "",
+                                "timestamp": str(datetime.now()),
+                                "final": True,
+                            }
+                        )
                     )
-                )
-                await rtvi.push_frame(BotInterruptionFrame(), FrameDirection.UPSTREAM)
-                await asyncio.sleep(0.1)
-                await task.queue_frames(
-                    [
-                        LLMMessagesAppendFrame(messages=message.data.get("messages", [])),
-                        LLMRunFrame(),
-                    ]
-                )
+                    await rtvi.push_frame(BotInterruptionFrame(), FrameDirection.UPSTREAM)
+                    await asyncio.sleep(0.1)
+                    await task.queue_frames(
+                        [
+                            LLMMessagesAppendFrame(messages=messages),
+                            LLMRunFrame(),
+                        ]
+                    )
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
 

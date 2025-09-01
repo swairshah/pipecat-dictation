@@ -3,11 +3,14 @@ Pipecat-compatible window control functions.
 Provides clean interfaces for LLM tool calls to control application windows.
 """
 
+import asyncio
 from typing import Dict, List, Optional
+
 from window_control import WindowController
+
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.services.llm_service import FunctionCallParams
-
+from pipecat.processors.frameworks.rtvi import RTVIServerMessageFrame
 
 # Global controller instance (singleton)
 _controller = None
@@ -77,8 +80,8 @@ def remember_window(name: str, wait_seconds: int = 3) -> Dict[str, any]:
     """
     controller = _get_controller()
 
-    # Sanitize the name
-    name = name.strip()
+    # Sanitize the name and convert to lowercase
+    name = name.strip().lower()
     if not name:
         return {"success": False, "error": "Window name cannot be empty"}
 
@@ -109,8 +112,20 @@ async def handle_remember_window(params: FunctionCallParams):
     Handle remember_window function call for Pipecat.
     """
     name = params.arguments.get("name")
-    wait_seconds = params.arguments.get("wait_seconds", 3)
-    result = remember_window(name, wait_seconds)
+    seconds = params.arguments.get("seconds", 3)
+    await params.llm.push_frame(
+        RTVIServerMessageFrame(
+            data={
+                "type": "remember-window",
+                "data": {
+                    "name": name,
+                    "seconds": seconds,
+                },
+            },
+        )
+    )
+    await asyncio.sleep(0.1)
+    result = remember_window(name, seconds)
     await params.result_callback(result)
 
 
@@ -177,10 +192,23 @@ async def handle_send_text_to_window(params: FunctionCallParams):
     """
     Handle send_text_to_window function call for Pipecat.
     """
-    text = params.arguments.get("text")
+    edited_text = params.arguments.get("edited_text")
+    raw_text = params.arguments.get("raw_text")
     window_name = params.arguments.get("window_name", None)
     send_newline = params.arguments.get("send_newline", True)
-    result = send_text_to_window(text, window_name, send_newline)
+    await params.llm.push_frame(
+        RTVIServerMessageFrame(
+            data={
+                "type": "sent-text",
+                "data": {
+                    "edited_text": edited_text,
+                    "raw_text": raw_text,
+                    "window_name": window_name,
+                },
+            },
+        )
+    )
+    result = send_text_to_window(edited_text, window_name, send_newline)
     await params.result_callback(result)
 
 
@@ -268,7 +296,11 @@ send_text_to_window_schema = FunctionSchema(
     name="send_text_to_window",
     description="Send text to a specific remembered window",
     properties={
-        "text": {"type": "string", "description": "The text to type into the window"},
+        "raw_text": {
+            "type": "string",
+            "description": "The literal text that was dictated, prior to any cleanup",
+        },
+        "edited_text": {"type": "string", "description": "The text to type into the window"},
         "window_name": {
             "type": "string",
             "description": "Name of the window to send text to (omit to use last focused window)",
@@ -279,7 +311,7 @@ send_text_to_window_schema = FunctionSchema(
             "default": True,
         },
     },
-    required=["text"],
+    required=["raw_text", "edited_text", "window_name"],
 )
 
 

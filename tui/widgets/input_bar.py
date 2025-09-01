@@ -24,7 +24,7 @@ class InputBar(Input):
             payload = json.loads(text)
         except Exception:
             payload = {
-                "id": str(self._sent_id),
+                "id": "input-" + str(self._sent_id),
                 "label": "rtvi-ai",
                 "type": "client-message",
                 "data": {"t": "llm-input", "d": {"messages": [{"role": "user", "content": text}]}},

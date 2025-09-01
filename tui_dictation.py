@@ -39,8 +39,9 @@ class DictationTUI(BotTUIBase):
     #rtvi_panes { layout: horizontal; height: 1fr; }
     """
 
+    # Note: ctrl+m is treated as Enter in many terminals; use F2 for mute
     BINDINGS = BotTUIBase.BINDINGS + [
-        ("ctrl+m", "toggle_mute", "Mute/Unmute"),
+        ("f2", "toggle_mute", "Mute/Unmute"),
     ]
 
     def __init__(self, bot_module) -> None:  # type: ignore[no-untyped-def]
@@ -52,6 +53,7 @@ class DictationTUI(BotTUIBase):
         self._muted: bool = False
         self._countdown_task: Optional[asyncio.Task] = None
         self._last_connected: bool = False
+        self._rtvi_sent_message_id: int = 0
 
     def compose(self) -> ComposeResult:  # type: ignore[override]
         yield Header(show_clock=True)
@@ -190,6 +192,23 @@ class DictationTUI(BotTUIBase):
     async def action_toggle_mute(self) -> None:
         self._muted = not self._muted
         self._update_status_suffix()
+        # Send control payload to the bot to toggle mute/unmute
+        try:
+            payload = {
+                "id": f"mute-{self._rtvi_sent_message_id}",
+                "label": "rtvi-ai",
+                "type": "client-message",
+                "data": {"t": "mute-unmute", "d": {"mute": bool(self._muted)}},
+            }
+            await self.transport_mgr.send_app_message(payload)
+            self._rtvi_sent_message_id += 1
+            if self.syslog is not None:
+                self.syslog.write_line(
+                    f"[info] {'Muted' if self._muted else 'Unmuted'} (sent client-message)"
+                )
+        except Exception as e:
+            if self.syslog is not None:
+                self.syslog.write_line(f"[error] Failed to send mute toggle: {e}")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

@@ -30,6 +30,18 @@ Try saying:
 - "Use the current window as the target window and name it terminal"
 - "Let's test, send hello world to the terminal"
 
+A TUI for macOS
+
+```
+uv run tui_dicatation.py --file bot-realtime-api.py
+```
+
+This has:
+1. A local transport for macOS with echo cancellation (macos/local_mac_transport.py)
+2. Some semi-reusable components for voice agent TUIs. (In the tui directory.)
+
+At some point I'll pull both of these out into their own repos and maybe make Python packages for them. I like TUIs. :-)
+
 ## How It Works
 
 The bot is a [Pipecat](https://pipecat.ai) voice agent that uses OpenAI's Realtime API and a few window management tools. You can use other models and different pipeline designs if you want to! Smaller/older models require different prompting and, in general, can't handle as much ambiguity in conversation flow and instructions.
