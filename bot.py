@@ -18,13 +18,14 @@ from pipecat.transports.base_transport import BaseTransport
 from pipecat.services.speechmatics.stt import SpeechmaticsSTTService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.cartesia.tts import CartesiaTTSService
-from pipecat.frames.frames import LLMRunFrame, LLMMessagesAppendFrame, BotInterruptionFrame
+from pipecat.frames.frames import LLMRunFrame, LLMMessagesAppendFrame
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.frameworks.rtvi import (
     RTVIConfig,
     RTVIObserver,
     RTVIProcessor,
     RTVIUserTranscriptionMessage,
+    BotInterruptionFrame,
 )
 from pipecat.frames.frames import StartFrame, StopFrame
 from macos.local_mac_transport import (
@@ -134,10 +135,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 try:
                     mute = bool(d.get("mute"))
                     if mute:
-                        await transport.input().process_frame(StopFrame(), FrameDirection.DOWNSTREAM)
+                        await transport.input().process_frame(
+                            StopFrame(), FrameDirection.DOWNSTREAM
+                        )
                         logger.info("Input muted via client-message")
                     else:
-                        await transport.input().process_frame(StartFrame(), FrameDirection.DOWNSTREAM)
+                        await transport.input().process_frame(
+                            StartFrame(), FrameDirection.DOWNSTREAM
+                        )
                         logger.info("Input unmuted via client-message")
                 except Exception:
                     logger.exception("Failed to toggle mute from client-message")
@@ -155,12 +160,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                             }
                         )
                     )
-                    await rtvi.push_frame(BotInterruptionFrame(), FrameDirection.UPSTREAM)
-                    await asyncio.sleep(0.1)
                     await task.queue_frames(
                         [
-                            LLMMessagesAppendFrame(messages=messages),
-                            LLMRunFrame(),
+                            BotInterruptionFrame(),
+                            LLMMessagesAppendFrame(messages=messages, run_llm=True),
                         ]
                     )
 
